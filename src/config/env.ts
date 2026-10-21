@@ -16,6 +16,8 @@ const schema = z
   PUBLIC_API_URL: z.string().url().default("http://localhost:4000"),
   WEB_ORIGIN: z.string().url(),
   SERVER_PORT: z.coerce.number().default(4000),
+  /** Use 127.0.0.1 behind a reverse proxy so the API is only reachable through it. */
+  HOST: z.string().default("0.0.0.0"),
   DB_POOL_MAX: z.coerce.number().int().min(2).max(100).default(20),
   NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
   /** Only set when running behind a reverse proxy you control. Otherwise client IPs can be spoofed. */
