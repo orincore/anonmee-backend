@@ -1,0 +1,1 @@
+ALTER TABLE "room_messages" ADD COLUMN "reply_to" jsonb;

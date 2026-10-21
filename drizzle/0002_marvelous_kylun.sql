@@ -1,0 +1,1 @@
+ALTER TABLE "groups" DROP COLUMN "max_members";
