@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { env } from "../../config/env";
-import { loginSchema, registerSchema, sendVerificationSchema, verifyEmailSchema } from "../../contracts";
+import { isReputedEmail, loginSchema, registerSchema, sendVerificationSchema, verifyEmailSchema } from "../../contracts";
 import { ACCESS_TTL_S, REFRESH_TTL_S, verifyAccess } from "../../lib/tokens";
 import { AuthError, type authService } from "./auth.service";
 
@@ -54,6 +54,13 @@ export function authRoutes(svc: Service, hooks: { onAccountDeleted?: (userId: st
       const username = parsed.success ? parsed.data.username : undefined;
       if (!id && !email) {
         return reply.code(400).send({ error: "invalid", message: "Email address is required." });
+      }
+      if (email && !isReputedEmail(email)) {
+        return reply.code(400).send({
+          error: "invalid",
+          field: "email",
+          message: "Please use a trusted email provider (such as Gmail, Outlook, Yahoo, iCloud, or Proton).",
+        });
       }
       const res = await svc.sendVerification({ userId: id ?? undefined, email, username });
       return reply.send(res);

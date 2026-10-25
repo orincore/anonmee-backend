@@ -14,8 +14,140 @@ export function ageFromDob(dob: Date, now: Date = new Date()): number {
 export const GENDERS = ["male", "female", "trans_man", "trans_woman", "non_binary", "prefer_not_to_say"] as const;
 export type Gender = (typeof GENDERS)[number];
 
+export const REPUTED_EMAIL_DOMAINS = new Set([
+  // Google
+  "gmail.com",
+  "googlemail.com",
+
+  // Microsoft
+  "outlook.com",
+  "outlook.co.uk",
+  "outlook.fr",
+  "outlook.de",
+  "outlook.es",
+  "outlook.it",
+  "outlook.in",
+  "outlook.com.au",
+  "hotmail.com",
+  "hotmail.co.uk",
+  "hotmail.fr",
+  "hotmail.de",
+  "hotmail.es",
+  "hotmail.it",
+  "hotmail.ca",
+  "hotmail.com.au",
+  "live.com",
+  "live.co.uk",
+  "live.fr",
+  "live.de",
+  "live.ca",
+  "live.com.au",
+  "msn.com",
+
+  // Yahoo
+  "yahoo.com",
+  "yahoo.co.uk",
+  "yahoo.co.in",
+  "yahoo.ca",
+  "yahoo.fr",
+  "yahoo.de",
+  "yahoo.es",
+  "yahoo.it",
+  "yahoo.com.au",
+  "yahoo.co.jp",
+  "yahoo.com.br",
+  "yahoo.com.mx",
+  "ymail.com",
+  "myyahoo.com",
+  "rocketmail.com",
+
+  // Apple
+  "icloud.com",
+  "me.com",
+  "mac.com",
+
+  // Proton
+  "proton.me",
+  "protonmail.com",
+  "pm.me",
+
+  // Zoho
+  "zoho.com",
+  "zohomail.com",
+  "zoho.in",
+  "zoho.eu",
+
+  // AOL
+  "aol.com",
+  "aim.com",
+
+  // Fastmail
+  "fastmail.com",
+  "fastmail.fm",
+
+  // GMX & Mail.com
+  "gmx.com",
+  "gmx.net",
+  "gmx.de",
+  "gmx.at",
+  "gmx.ch",
+  "mail.com",
+  "email.com",
+  "usa.com",
+
+  // Yandex
+  "yandex.com",
+  "yandex.ru",
+  "ya.ru",
+
+  // Tuta
+  "tuta.com",
+  "tutanota.com",
+
+  // Web.de
+  "web.de",
+
+  // App & Org
+  "orincore.com",
+  "anonmee.in",
+  "anonmee.orincore.com",
+]);
+
+export function isReputedEmail(email: string): boolean {
+  if (!email || typeof email !== "string" || !email.includes("@")) return false;
+  const parts = email.trim().toLowerCase().split("@");
+  if (parts.length !== 2) return false;
+  const domain = parts[1]!;
+
+  if (REPUTED_EMAIL_DOMAINS.has(domain)) return true;
+
+  // Recognized educational institution domains
+  if (
+    domain.endsWith(".edu") ||
+    domain.endsWith(".ac.uk") ||
+    domain.endsWith(".edu.in") ||
+    domain.endsWith(".ac.in") ||
+    domain.endsWith(".edu.au") ||
+    domain.endsWith(".edu.ca") ||
+    domain.endsWith(".edu.sg")
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
 export const registerSchema = z.object({
-  email: z.string().trim().toLowerCase().email("Enter a valid email address").max(254, "That email is too long"),
+  email: z
+    .string()
+    .trim()
+    .toLowerCase()
+    .email("Enter a valid email address")
+    .max(254, "That email is too long")
+    .refine(
+      isReputedEmail,
+      "Please use a trusted email provider (such as Gmail, Outlook, Yahoo, iCloud, or Proton)",
+    ),
   password: z.string().min(8, "Use at least 8 characters").max(128, "Use 128 characters or fewer"),
   username: z
     .string()
