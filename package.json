@@ -10,6 +10,7 @@
     "db:migrate": "drizzle-kit migrate",
     "test": "vitest run",
     "admin:create": "tsx --env-file=.env scripts/create-admin.ts",
+    "admin:password": "tsx --env-file=.env scripts/reset-admin.ts",
     "start": "tsx --env-file=.env src/index.ts"
   },
   "dependencies": {
