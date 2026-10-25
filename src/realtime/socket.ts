@@ -4,7 +4,7 @@ import { eq } from "drizzle-orm";
 import { createAdapter } from "@socket.io/redis-adapter";
 import { Server } from "socket.io";
 import { env } from "../config/env";
-import { ageFromDob, EV } from "../contracts";
+import { ageFromDob, EV, screenHeartbeatSchema } from "../contracts";
 import type { Db } from "../db/client";
 import { matches, users } from "../db/schema";
 import { verifyAccess } from "../lib/tokens";
@@ -13,6 +13,7 @@ import { chatStore } from "../modules/chat/chat.store";
 import { matchingService, type MatchNotifier } from "../modules/matching/matching.service";
 import { groupOfIntent } from "../contracts";
 import { moderationRepo } from "../modules/moderation/moderation.repo";
+import type { ActivityService } from "../modules/presence/activity.service";
 import { presenceService } from "../modules/presence/presence.service";
 import { pulseService } from "../modules/presence/pulse.service";
 import type { AppSocket } from "./context";
@@ -26,7 +27,7 @@ import { registerMatchHandlers } from "./handlers/match.handlers";
 const CHAT_GRACE_MS = 30_000;
 const QUEUE_GRACE_MS = 5_000;
 
-export function createRealtime(httpServer: HttpServer, db: Db, redis: RedisClient, chats = chatStore(redis)) {
+export function createRealtime(httpServer: HttpServer, db: Db, redis: RedisClient, chats = chatStore(redis), activity?: ActivityService) {
   const io = new Server(httpServer, {
     cors: { origin: env.WEB_ORIGIN, credentials: true },
     maxHttpBufferSize: 16 * 1024,
@@ -96,8 +97,15 @@ export function createRealtime(httpServer: HttpServer, db: Db, redis: RedisClien
     const uid = socket.data.userId;
     // Handlers first, with no await before them: a client may emit the instant it connects.
     registerMatchHandlers(socket, matching);
-    registerChatHandlers(socket, io, chats, reactions, matching, (id, why) => void endedRecord(id, why));
-    registerRoomHandlers(socket, io, rooms);
+    registerChatHandlers(socket, io, chats, reactions, matching, (id, why) => void endedRecord(id, why), activity);
+    registerRoomHandlers(socket, io, rooms, undefined, activity);
+    socket.on(EV.screenHeartbeat, (data: unknown) => {
+      const p = screenHeartbeatSchema.safeParse(data);
+      if (p.success && activity) {
+        void activity.recordScreenTime(uid, p.data.seconds);
+        void presence.touch(uid);
+      }
+    });
     localUsers.set(uid, localCount(uid) + 1);
     await socket.join(`u:${uid}`);
     await socket.join("r:global");

@@ -32,6 +32,7 @@ export const users = pgTable(
     bannedAt: timestamp("banned_at"),
     deviceFingerprint: varchar("device_fingerprint", { length: 64 }),
     deviceId: varchar("device_id", { length: 64 }),
+    screenTimeSeconds: integer("screen_time_seconds").notNull().default(0),
     createdAt: timestamp("created_at", { precision: 3 }).notNull().defaultNow(),
   },
   (t) => [
@@ -253,5 +254,20 @@ export const emailVerificationCodes = pgTable(
   (t) => [
     index("email_verification_email_idx").on(t.email),
     index("email_verification_expires_idx").on(t.expiresAt),
+  ],
+);
+
+export const userActivityDaily = pgTable(
+  "user_activity_daily",
+  {
+    userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+    day: date("day", { mode: "string" }).notNull(),
+    screenTimeSeconds: integer("screen_time_seconds").notNull().default(0),
+    messagesSent: integer("messages_sent").notNull().default(0),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.userId, t.day] }),
+    index("idx_user_activity_daily_day").on(t.day),
   ],
 );

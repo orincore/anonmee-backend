@@ -7,6 +7,7 @@ import { chatStore } from "./modules/chat/chat.store";
 import { peerResolver } from "./modules/moderation/moderation.peers";
 import { reactionsService } from "./modules/chat/reactions.service";
 import { roomsService } from "./modules/chat/rooms.service";
+import { activityService } from "./modules/presence/activity.service";
 import { presenceService } from "./modules/presence/presence.service";
 import { pulseService } from "./modules/presence/pulse.service";
 import { runRetention } from "./modules/maintenance/retention";
@@ -19,16 +20,20 @@ export async function buildServer(db: Db, redis: RedisClient) {
   let moderated: (roomId: string, target: string, kind: "block" | "report", banned: boolean) => void = () => {};
   let banned: (userId: string) => void = () => {};
   const chats = chatStore(redis);
+  const presence = presenceService(redis);
+  const pulse = pulseService(redis);
+  const activity = activityService(db, redis, presence);
   const app = await buildApp(db, {
     onGroupCreated: (g) => announce(g),
     onGroupLeft: (gid, uid) => groupLeft(gid, uid),
     peers: peerResolver(db, redis, chats, () => roomsService(db, redis, reactionsService(redis)).flush()),
     onModerated: (...a) => moderated(...a),
-    presence: presenceService(redis),
-    pulse: pulseService(redis),
+    presence,
+    pulse,
+    activity,
     onUserBanned: (id) => banned(id),
   });
-  const rt = createRealtime(app.server, db, redis, chats);
+  const rt = createRealtime(app.server, db, redis, chats, activity);
   groupLeft = (gid, uid) => void rt.io.in(`u:${uid}`).socketsLeave(`r:${gid}`);
   announce = (g) => {
     rt.io.emit(EV.groupCreated, g);

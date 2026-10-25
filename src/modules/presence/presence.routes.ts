@@ -1,13 +1,16 @@
 import type { FastifyInstance } from "fastify";
+import { z } from "zod";
 import type { RedisClient } from "../../lib/redis";
 import type { Db } from "../../db/client";
 import { sql } from "drizzle-orm";
 import { matches } from "../../db/schema";
+import { verifyAccess } from "../../lib/tokens";
+import type { ActivityService } from "./activity.service";
 import type { PresenceService } from "./presence.service";
 import type { PulseService } from "./pulse.service";
 
 /** Public online counter for server-rendered pages. Cached for 5 seconds so it costs almost nothing. */
-export function presenceRoutes(presence: PresenceService, redis: RedisClient, pulse: PulseService, db: Db) {
+export function presenceRoutes(presence: PresenceService, redis: RedisClient, pulse: PulseService, db: Db, activity?: ActivityService) {
   return async function (app: FastifyInstance) {
     app.get("/stats/online", async (_req, reply) => {
       const hit = await redis.get("stats:online");
@@ -29,6 +32,20 @@ export function presenceRoutes(presence: PresenceService, redis: RedisClient, pu
       await redis.set("stats:pulse", JSON.stringify(out), "EX", 3);
       reply.header("cache-control", "public, max-age=3");
       return out;
+    });
+
+    // Heartbeat to record screen time (HTTP fallback if socket is reconnecting)
+    app.post("/presence/heartbeat", async (req, reply) => {
+      const token = req.cookies.access;
+      const id = token ? await verifyAccess(token) : null;
+      if (!id) return reply.code(401).send({ error: "unauthorized" });
+      const b = z.object({ seconds: z.number().int().min(1).max(300) }).safeParse(req.body);
+      if (!b.success) return reply.code(400).send({ error: "invalid" });
+      if (activity) {
+        await activity.recordScreenTime(id, b.data.seconds);
+        await presence.touch(id);
+      }
+      return { ok: true };
     });
   };
 }

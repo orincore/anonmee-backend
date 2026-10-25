@@ -12,6 +12,7 @@ import { groupsRoutes, type GroupView } from "./modules/groups/groups.routes";
 import { presenceRoutes } from "./modules/presence/presence.routes";
 import type { PulseService } from "./modules/presence/pulse.service";
 import { adminRoutes } from "./modules/admin/admin.routes";
+import { activityService, type ActivityService } from "./modules/presence/activity.service";
 import type { PresenceService } from "./modules/presence/presence.service";
 import { analyticsRepo } from "./modules/analytics/analytics.repo";
 import { analyticsRoutes } from "./modules/analytics/analytics.routes";
@@ -31,6 +32,7 @@ export interface AppHooks {
   peers?: PeerResolver;
   presence?: PresenceService;
   pulse?: PulseService;
+  activity?: ActivityService;
   onUserBanned?: (userId: string) => void;
   onModerated?: (roomId: string, targetUserId: string, kind: "block" | "report", banned: boolean) => void;
 }
@@ -78,8 +80,9 @@ export async function buildApp(db: Db, hooks: AppHooks = {}) {
   await app.register(preferencesRoutes(db));
   await app.register(groupsRoutes({ db, redis, onCreated: (g) => hooks.onGroupCreated?.(g), onLeft: (gid, uid) => hooks.onGroupLeft?.(gid, uid) }));
   if (hooks.presence && hooks.pulse) {
-    await app.register(presenceRoutes(hooks.presence, redis, hooks.pulse, db));
-    await app.register(adminRoutes({ db, redis, presence: hooks.presence, onBanned: (id) => hooks.onUserBanned?.(id) }));
+    const act = hooks.activity ?? activityService(db, redis, hooks.presence);
+    await app.register(presenceRoutes(hooks.presence, redis, hooks.pulse, db, act));
+    await app.register(adminRoutes({ db, redis, presence: hooks.presence, activity: act, onBanned: (id) => hooks.onUserBanned?.(id) }));
   }
   if (hooks.peers) {
     await app.register(moderationRoutes({ db, peers: hooks.peers, onActed: (...a) => hooks.onModerated?.(...a) }));

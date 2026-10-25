@@ -6,11 +6,12 @@ import { env } from "../../config/env";
 import { ageFromDob } from "../../contracts";
 import type { Db } from "../../db/client";
 import {
-  adminAudit, blocks, campaigns, groups, matches, preferences, refreshTokens, reports, roomMessages, users, visits,
+  adminAudit, blocks, campaigns, groups, matches, preferences, refreshTokens, reports, roomMessages, userActivityDaily, users, visits,
 } from "../../db/schema";
 import type { RedisClient } from "../../lib/redis";
 import { loginThrottle } from "../../lib/throttle";
 import { buildCampaignUrl } from "../analytics/attribution";
+import type { ActivityService } from "../presence/activity.service";
 import type { PresenceService } from "../presence/presence.service";
 import { ADMIN_TTL_S, AdminAuthError, adminAuth, requireRole, type AdminSession } from "./admin.auth";
 
@@ -29,8 +30,14 @@ function dec(c?: string) {
 const daysQ = z.object({ days: z.coerce.number().int().min(1).max(365).default(7) });
 const since = (days: number) => new Date(Date.now() - days * 86_400_000);
 
-export function adminRoutes(deps: { db: Db; redis: RedisClient; presence: PresenceService; onBanned: (userId: string) => void }) {
-  const { db, redis } = deps;
+export function adminRoutes(deps: {
+  db: Db;
+  redis: RedisClient;
+  presence: PresenceService;
+  activity: ActivityService;
+  onBanned: (userId: string) => void;
+}) {
+  const { db, redis, activity } = deps;
   const auth = adminAuth(db, redis, loginThrottle(redis));
   const audit = (s: AdminSession, action: string, targetUserId?: string, meta?: unknown) =>
     db.insert(adminAudit).values({ adminId: s.adminId, action, targetUserId, meta: meta ? JSON.stringify(meta) : null });
@@ -186,7 +193,7 @@ export function adminRoutes(deps: { db: Db; redis: RedisClient; presence: Presen
       await audit(s, "user.view", u.id); // every look at an account is on record
       const one = async (q: Promise<{ n: number }[]>) => (await q)[0]?.n ?? 0;
       const [prefs] = await db.select().from(preferences).where(eq(preferences.userId, u.id)).limit(1);
-      const [matchesN, blocksGiven, blocksReceived, reportsMade, reportsReceived, groupsOwned, sessions] = await Promise.all([
+      const [matchesN, blocksGiven, blocksReceived, reportsMade, reportsReceived, groupsOwned, sessions, todayActivity] = await Promise.all([
         one(db.select({ n: sql<number>`count(*)::int` }).from(matches).where(or(eq(matches.userAId, u.id), eq(matches.userBId, u.id)))),
         one(db.select({ n: sql<number>`count(*)::int` }).from(blocks).where(eq(blocks.blockerId, u.id))),
         one(db.select({ n: sql<number>`count(*)::int` }).from(blocks).where(eq(blocks.blockedId, u.id))),
@@ -194,6 +201,10 @@ export function adminRoutes(deps: { db: Db; redis: RedisClient; presence: Presen
         one(db.select({ n: sql<number>`count(*)::int` }).from(reports).where(eq(reports.reportedId, u.id))),
         one(db.select({ n: sql<number>`count(*)::int` }).from(groups).where(eq(groups.ownerId, u.id))),
         one(db.select({ n: sql<number>`count(*)::int` }).from(refreshTokens).where(and(eq(refreshTokens.userId, u.id), isNull(refreshTokens.revokedAt)))),
+        db.select({
+          screenTimeSeconds: userActivityDaily.screenTimeSeconds,
+          messagesSent: userActivityDaily.messagesSent,
+        }).from(userActivityDaily).where(and(eq(userActivityDaily.userId, u.id), eq(userActivityDaily.day, sql`CURRENT_DATE`))).limit(1).then((r) => r[0]),
       ]);
       return {
         user: {
@@ -202,6 +213,11 @@ export function adminRoutes(deps: { db: Db; redis: RedisClient; presence: Presen
           acquisition: { channel: u.acquisitionChannel, source: u.acquisitionSource, campaign: u.acquisitionCampaign },
           preferences: prefs ? { intents: prefs.intents, wantGenders: prefs.wantGenders, minAge: prefs.minAge, maxAge: prefs.maxAge, interests: prefs.interests } : null,
           counts: { matches: matchesN, blocksGiven, blocksReceived, reportsMade, reportsReceived, groupsOwned, activeSessions: sessions },
+          activity: {
+            totalScreenTimeSeconds: u.screenTimeSeconds ?? 0,
+            todayScreenTimeSeconds: todayActivity?.screenTimeSeconds ?? 0,
+            todayMessagesSent: todayActivity?.messagesSent ?? 0,
+          },
         },
       };
     });
@@ -219,6 +235,19 @@ export function adminRoutes(deps: { db: Db; redis: RedisClient; presence: Presen
       }
       await audit(s, b.data.banned ? "user.ban" : "user.unban", p.data.id);
       return { ok: true };
+    });
+
+    // ---------- Activity / Screen Time Analytics ----------
+    app.get("/admin/activity", async (req, reply) => {
+      const s = await requireRole(auth, req, reply, [...ALL]);
+      if (!s) return;
+      const q = z.object({
+        days: z.coerce.number().int().min(1).max(90).default(7),
+        search: z.string().trim().max(60).optional(),
+        page: z.coerce.number().int().min(1).default(1),
+        limit: z.coerce.number().int().min(5).max(100).default(20),
+      }).parse(req.query);
+      return activity.getActivityAnalytics(q.days, q.search, q.page, q.limit);
     });
 
     // ---------- Traffic analytics ----------

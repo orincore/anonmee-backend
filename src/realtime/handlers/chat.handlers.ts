@@ -2,6 +2,7 @@ import { chatMessageSchema, EV, reactSchema, resumeSchema, roomRefSchema } from 
 import { previewOf } from "../../lib/reply";
 import { ReactionError, type ReactionsService } from "../../modules/chat/reactions.service";
 import { cleanMessage } from "../../lib/text";
+import type { ActivityService } from "../../modules/presence/activity.service";
 import type { ChatStore } from "../../modules/chat/chat.store";
 import type { AppServer, AppSocket } from "../context";
 import { HandlerError, handle } from "../handle";
@@ -27,6 +28,7 @@ export function registerChatHandlers(
   reactions: ReactionsService,
   matching: ReturnType<typeof matchingService>,
   onEnded: (chatId: string, reason: string) => void,
+  activity?: ActivityService,
 ) {
   const uid = socket.data.userId;
 
@@ -51,6 +53,7 @@ export function registerChatHandlers(
     }
     const msg = await chats.append(chat, me, d.clientMsgId, text, replyTo);
     io.to(bothSides(chat)).emit(EV.chatMessage, msg);
+    if (activity) void activity.recordMessageSent(uid);
     ack({ ok: true, seq: msg.seq, id: msg.id });
   });
 

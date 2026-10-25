@@ -1,4 +1,5 @@
 import { chatMessageSchema, EV, reactSchema, roomJoinSchema, roomOlderSchema, roomReadSchema, roomRefSchema, roomTypingSchema } from "../../contracts";
+import type { ActivityService } from "../../modules/presence/activity.service";
 import { ReactionError } from "../../modules/chat/reactions.service";
 import { RoomError, type RoomsService } from "../../modules/chat/rooms.service";
 import type { TypingStore } from "../../modules/chat/typing.store";
@@ -14,7 +15,7 @@ const wrap = async <T>(fn: () => Promise<T>): Promise<T> => {
   }
 };
 
-export function registerRoomHandlers(socket: AppSocket, io: AppServer, rooms: RoomsService, typing?: TypingStore) {
+export function registerRoomHandlers(socket: AppSocket, io: AppServer, rooms: RoomsService, typing?: TypingStore, activity?: ActivityService) {
   const sender = () => socket.data;
   const throttle = new Map<string, number>();
 
@@ -49,6 +50,7 @@ export function registerRoomHandlers(socket: AppSocket, io: AppServer, rooms: Ro
     if (!duplicate) {
       io.to(`r:${d.roomId}`).emit(EV.roomMessage, message);
       void clearTypingOnMessage(typing, io, d.roomId, sender().userId);
+      if (activity) void activity.recordMessageSent(sender().userId);
     }
     ack({ ok: true, seq: message.seq, id: message.id, duplicate });
   });

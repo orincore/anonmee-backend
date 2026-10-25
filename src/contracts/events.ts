@@ -27,8 +27,13 @@ export const EV = {
   roomRead: "room:read",
   groupCreated: "group:created",
   pulse: "pulse:event",
+  screenHeartbeat: "screen:heartbeat",
   error: "error",
 } as const;
+
+export const screenHeartbeatSchema = z.object({
+  seconds: z.number().int().min(1).max(300),
+});
 
 /** One line of the public live ticker. Carries no user information: the kind of chat, or a public group title. */
 export type PulseEvent =
