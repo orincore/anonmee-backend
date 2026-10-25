@@ -20,17 +20,16 @@ export function handle<T>(
   schema: ZodType<T>,
   fn: (data: T, ack: Ack) => Promise<void> | void,
 ) {
-  const bucket = socketBuckets.get(socket) ?? socketBuckets.set(socket, tokenBucket(8, 20)).get(socket)!;
+  const bucket = socketBuckets.get(socket) ?? socketBuckets.set(socket, tokenBucket(30, 80)).get(socket)!;
   let strikes = 0;
   socket.on(event, async (raw: unknown, ack?: Ack) => {
     const reply: Ack = typeof ack === "function" ? ack : () => {};
     if (!bucket.take()) {
-      if (++strikes >= 5) socket.disconnect(true);
       return reply({ ok: false, error: "rate_limited", message: "Slow down a little." });
     }
     const parsed = schema.safeParse(raw ?? {});
     if (!parsed.success) {
-      if (++strikes >= 5) socket.disconnect(true);
+      if (++strikes >= 20) socket.disconnect(true);
       return reply({ ok: false, error: "invalid", message: "That request was not valid." });
     }
     try {
