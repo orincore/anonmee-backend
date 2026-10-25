@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { env } from "../../config/env";
-import { loginSchema, registerSchema } from "../../contracts";
+import { loginSchema, registerSchema, sendVerificationSchema, verifyEmailSchema } from "../../contracts";
 import { ACCESS_TTL_S, REFRESH_TTL_S, verifyAccess } from "../../lib/tokens";
 import { AuthError, type authService } from "./auth.service";
 
@@ -37,12 +37,76 @@ export function authRoutes(svc: Service, hooks: { onAccountDeleted?: (userId: st
       return reply.code(201).send({ user });
     });
 
+    /** Sends a 6-digit verification code to the user's email via Brevo SMTP. */
+    app.post("/auth/send-verification", limited, async (req, reply) => {
+      const token = req.cookies.access;
+      const id = token ? await verifyAccess(token) : null;
+      const parsed = z
+        .object({
+          email: z.string().trim().toLowerCase().email().optional(),
+          username: z.string().trim().optional(),
+        })
+        .safeParse(req.body);
+      if (!parsed.success && !id) {
+        return reply.code(400).send({ error: "invalid", message: "Enter a valid email address." });
+      }
+      const email = parsed.success ? parsed.data.email : undefined;
+      const username = parsed.success ? parsed.data.username : undefined;
+      if (!id && !email) {
+        return reply.code(400).send({ error: "invalid", message: "Email address is required." });
+      }
+      const res = await svc.sendVerification({ userId: id ?? undefined, email, username });
+      return reply.send(res);
+    });
+
+    /** Verifies the 6-digit code during signup and returns a signed verificationToken. */
+    app.post("/auth/verify-code", limited, async (req, reply) => {
+      const parsed = z
+        .object({
+          email: z.string().trim().toLowerCase().email("Enter a valid email address"),
+          code: z.string().trim().regex(/^\d{6}$/, "Enter a 6-digit verification code"),
+        })
+        .safeParse(req.body);
+      if (!parsed.success) {
+        return reply.code(400).send({
+          error: "invalid",
+          message: parsed.error.issues[0]?.message ?? "Enter the 6-digit verification code.",
+          field: parsed.error.issues[0]?.path[0],
+        });
+      }
+      const res = await svc.verifySignupCode(parsed.data.email, parsed.data.code);
+      return reply.send(res);
+    });
+
+    /** Verifies the 6-digit code entered by the user. */
+    app.post("/auth/verify-email", limited, async (req, reply) => {
+      const parsed = verifyEmailSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return reply.code(400).send({ error: "invalid", message: parsed.error.issues[0]?.message ?? "Enter the 6-digit code." });
+      }
+      const token = req.cookies.access;
+      const id = token ? await verifyAccess(token) : null;
+      if (!id && !parsed.data.email) {
+        return reply.code(400).send({ error: "invalid", message: "Please log in or provide your email." });
+      }
+      const res = await svc.verifyEmail(parsed.data.code, { userId: id ?? undefined, email: parsed.data.email });
+      return reply.send(res);
+    });
+
     app.post("/auth/login", limited, async (req, reply) => {
       const parsed = loginSchema.safeParse(req.body);
-      if (!parsed.success) return reply.code(400).send({ error: "invalid", message: "Enter your email and password." });
+      if (!parsed.success) return reply.code(400).send({ error: "invalid", message: "Enter your email or username and password." });
       const { user, ...session } = await svc.login(parsed.data, req.ip);
       setSession(reply, session);
       return { user };
+    });
+
+    /** Quick check used by the sign-up form to tell the user whether a username is taken. */
+    app.get("/auth/check-username", { config: { rateLimit: { max: process.env.NODE_ENV === "test" ? 1000 : 60, timeWindow: "1 minute" } } }, async (req) => {
+      const parsed = z.object({ username: z.string().min(1).max(20) }).safeParse(req.query);
+      if (!parsed.success) return { available: false };
+      const taken = await svc.isUsernameTaken(parsed.data.username);
+      return { available: !taken };
     });
 
     app.post("/auth/refresh", async (req, reply) => {
@@ -70,6 +134,12 @@ export function authRoutes(svc: Service, hooks: { onAccountDeleted?: (userId: st
       hooks.onAccountDeleted?.(id); // cut off any open chats
       reply.clearCookie("access", { path: "/" }).clearCookie("refresh", { path: "/auth" });
       return { ok: true };
+    });
+
+    app.get("/auth/verification-status", async (req, reply) => {
+      const id = await requireUser(req, reply);
+      if (!id) return;
+      return svc.getVerificationStatus(id);
     });
 
     app.get("/auth/me", async (req, reply) => {

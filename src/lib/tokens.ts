@@ -27,3 +27,26 @@ export function newRefreshToken() {
   return { token, hash: hashRefresh(token) };
 }
 export const hashRefresh = (token: string) => createHash("sha256").update(token).digest("hex");
+
+export const VERIFY_TTL_S = 30 * 60; // 30 minutes to finish wizard after verifying email
+
+/** Issues a signed proof that an email address was verified via 6-digit OTP code. */
+export async function signVerificationToken(email: string): Promise<string> {
+  return new SignJWT({ email: email.toLowerCase() })
+    .setProtectedHeader({ alg: "HS256" })
+    .setSubject("email_verified")
+    .setIssuedAt()
+    .setExpirationTime(`${VERIFY_TTL_S}s`)
+    .sign(accessKey);
+}
+
+/** Verifies the token and returns the verified email, or null if invalid/expired. */
+export async function verifyVerificationToken(token: string): Promise<string | null> {
+  try {
+    const { payload } = await jwtVerify(token, accessKey, { algorithms: ["HS256"] });
+    if (payload.sub !== "email_verified") return null;
+    return (payload.email as string) ?? null;
+  } catch {
+    return null;
+  }
+}

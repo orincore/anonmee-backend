@@ -95,11 +95,13 @@ export function createRealtime(httpServer: HttpServer, db: Db, redis: RedisClien
     const uid = socket.data.userId;
     // Handlers first, with no await before them: a client may emit the instant it connects.
     registerMatchHandlers(socket, matching);
-    registerChatHandlers(socket, io, chats, reactions, (id, why) => void endedRecord(id, why));
+    registerChatHandlers(socket, io, chats, reactions, matching, (id, why) => void endedRecord(id, why));
     registerRoomHandlers(socket, io, rooms);
     localUsers.set(uid, localCount(uid) + 1);
     await socket.join(`u:${uid}`);
     await presence.touch(uid);
+    // Send the current count immediately so the client never waits for the 3-second broadcast interval.
+    void presence.count().then((count) => socket.emit(EV.presenceCount, { count }));
 
     // Tell a returning user about the chat they are still in or the match they were waiting for.
     const active = await chats.activeChatId(uid);

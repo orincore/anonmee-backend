@@ -22,6 +22,11 @@ const schema = z
   NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
   /** Only set when running behind a reverse proxy you control. Otherwise client IPs can be spoofed. */
   TRUST_PROXY: z.enum(["true", "false"]).default("false").transform((v) => v === "true"),
+  SMTP_HOST: z.string().default("smtp-relay.brevo.com"),
+  SMTP_PORT: z.coerce.number().default(587),
+  SMTP_USER: z.string().default(""),
+  SMTP_PASS: z.string().default(""),
+  SMTP_FROM: z.string().default("Anonmee <no-reply@anonmee.orincore.com>"),
   })
   .superRefine((e, ctx) => {
     if (e.NODE_ENV !== "production") return;

@@ -21,6 +21,7 @@ import { preferencesRoutes } from "./modules/preferences/preferences.routes";
 import { authRepo } from "./modules/auth/auth.repo";
 import { authRoutes } from "./modules/auth/auth.routes";
 import { AuthError, authService } from "./modules/auth/auth.service";
+import { verificationService } from "./modules/auth/verification.service";
 
 const SAFE = new Set(["GET", "HEAD", "OPTIONS"]);
 
@@ -71,7 +72,7 @@ export async function buildApp(db: Db, hooks: AppHooks = {}) {
   });
 
   app.get("/health", async () => ({ ok: true }));
-  await app.register(authRoutes(authService(authRepo(db), loginThrottle(redis), analyticsRepo(db)), { onAccountDeleted: (id) => hooks.onUserBanned?.(id) }));
+  await app.register(authRoutes(authService(authRepo(db), loginThrottle(redis), verificationService(redis), analyticsRepo(db)), { onAccountDeleted: (id) => hooks.onUserBanned?.(id) }));
   await app.register(analyticsRoutes(db));
   await app.register(preferencesRoutes(db));
   await app.register(groupsRoutes({ db, redis, onCreated: (g) => hooks.onGroupCreated?.(g) }));

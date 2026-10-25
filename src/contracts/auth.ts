@@ -31,12 +31,27 @@ export const registerSchema = z.object({
   /** Id returned by /track/visit, so the sign-up is credited to the link or search that brought the person. */
   visitId: z.string().uuid().optional(),
   confirmAdult: z.literal(true, { errorMap: () => ({ message: "Confirm you are 18 or older" }) }),
+  verificationToken: z.string().optional(),
+  code: z.string().optional(),
 });
 
 export const loginSchema = z.object({
-  email: z.string().trim().toLowerCase().email(),
+  /** Email address or username — detected by whether the value contains an @. */
+  identifier: z.string().trim().min(1, "Enter your email or username").max(254),
   password: z.string().min(1).max(128),
 });
 
 export type RegisterInput = z.infer<typeof registerSchema>;
 export type LoginInput = z.infer<typeof loginSchema>;
+
+export const verifyEmailSchema = z.object({
+  code: z.string().trim().regex(/^\d{6}$/, "Enter a 6-digit verification code"),
+  email: z.string().trim().toLowerCase().email().optional(),
+});
+
+export const sendVerificationSchema = z.object({
+  email: z.string().trim().toLowerCase().email().optional(),
+});
+
+export type VerifyEmailInput = z.infer<typeof verifyEmailSchema>;
+export type SendVerificationInput = z.infer<typeof sendVerificationSchema>;

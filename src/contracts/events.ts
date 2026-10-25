@@ -12,6 +12,7 @@ export const EV = {
   chatMessage: "chat:message",
   chatTyping: "chat:typing",
   chatEnd: "chat:end",
+  chatSkip: "chat:skip",
   roomJoin: "room:join",
   roomLeave: "room:leave",
   roomMessage: "room:message",

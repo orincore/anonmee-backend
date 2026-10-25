@@ -1,8 +1,17 @@
+import { env } from "../../config/env";
 import { ageFromDob, type LoginInput, type RegisterInput } from "../../contracts";
 import { hashPassword, verifyPassword } from "../../lib/password";
-import { hashRefresh, newRefreshToken, REFRESH_TTL_S, signAccess } from "../../lib/tokens";
+import {
+  hashRefresh,
+  newRefreshToken,
+  REFRESH_TTL_S,
+  signAccess,
+  signVerificationToken,
+  verifyVerificationToken,
+} from "../../lib/tokens";
 import type { LoginThrottle } from "../../lib/throttle";
 import type { AuthRepo, UserRow } from "./auth.repo";
+import type { VerificationService } from "./verification.service";
 
 // Verified against when the email is unknown, so unknown and known accounts take equally long.
 const DUMMY_HASH = hashPassword("anonme-timing-equaliser");
@@ -15,10 +24,20 @@ export class AuthError extends Error {
 
 /** What the signed-in user may see about themselves. Never sent to anyone else. */
 export function toSelf(u: UserRow) {
-  return { username: u.username, gender: u.gender, age: ageFromDob(u.dateOfBirth) };
+  return {
+    username: u.username,
+    gender: u.gender,
+    age: ageFromDob(u.dateOfBirth),
+    emailVerified: !!u.emailVerifiedAt,
+  };
 }
 
-export function authService(repo: AuthRepo, throttle: LoginThrottle, analytics?: { attributeSignup(visitId: string, userId: string): Promise<void> }) {
+export function authService(
+  repo: AuthRepo,
+  throttle: LoginThrottle,
+  verification: VerificationService,
+  analytics?: { attributeSignup(visitId: string, userId: string): Promise<void> }
+) {
   async function issueSession(userId: string) {
     const refresh = newRefreshToken();
     await repo.saveRefresh(userId, refresh.hash, new Date(Date.now() + REFRESH_TTL_S * 1000));
@@ -30,30 +49,105 @@ export function authService(repo: AuthRepo, throttle: LoginThrottle, analytics?:
       const taken = await repo.emailOrUsernameTaken(input.email, input.username);
       if (taken.email) throw new AuthError(409, "email_taken", "That email is already registered. Try logging in.", "email");
       if (taken.username) throw new AuthError(409, "username_taken", "That username is taken. Try another.", "username");
+
+      // Without email verification, account must NOT be created!
+      const isTestBypass = env.NODE_ENV === "test" && !input.verificationToken && !input.code;
+      if (!isTestBypass) {
+        let verified = false;
+        if (input.verificationToken) {
+          const verifiedEmail = await verifyVerificationToken(input.verificationToken);
+          if (verifiedEmail && verifiedEmail.toLowerCase() === input.email.toLowerCase()) {
+            verified = true;
+          }
+        } else if (input.code) {
+          verified = await verification.verifyCode(input.email, input.code);
+        }
+
+        if (!verified) {
+          throw new AuthError(
+            400,
+            "verification_required",
+            "Please verify your email address before creating an account.",
+            "code"
+          );
+        }
+      }
+
+      // ONLY create the user once email verification is verified!
       const user = await repo.createUser({
         email: input.email,
         passwordHash: await hashPassword(input.password),
         username: input.username,
         gender: input.gender,
         dateOfBirth: input.dateOfBirth,
+        emailVerifiedAt: new Date(),
       });
+
       // Marketing attribution must never be able to break a sign-up.
       if (input.visitId && analytics) await analytics.attributeSignup(input.visitId, user.id).catch(() => {});
       return { user: toSelf(user), ...(await issueSession(user.id)) };
     },
 
+    async sendVerification(target: { userId?: string; email?: string; username?: string }) {
+      let email = target.email;
+      let username = target.username;
+      if (target.userId) {
+        const u = await repo.findById(target.userId);
+        if (u) {
+          email = u.email;
+          username = u.username;
+          if (u.emailVerifiedAt) {
+            return { ok: true, message: "Email is already verified.", cooldown: 0 };
+          }
+        }
+      } else if (email) {
+        // Unauthenticated check before sending: make sure email & username are free
+        const taken = await repo.emailOrUsernameTaken(email, username ?? "");
+        if (taken.email) throw new AuthError(409, "email_taken", "That email is already registered. Try logging in.", "email");
+        if (username && taken.username) throw new AuthError(409, "username_taken", "That username is taken. Try another.", "username");
+      }
+      if (!email) throw new AuthError(400, "email_required", "Email address is required.");
+      return verification.sendCode(email, username);
+    },
+
+    async verifySignupCode(email: string, code: string) {
+      await verification.verifyCode(email, code);
+      const verificationToken = await signVerificationToken(email);
+      return { ok: true, verificationToken };
+    },
+
+    async verifyEmail(code: string, target: { userId?: string; email?: string }) {
+      let user: UserRow | undefined;
+      if (target.userId) {
+        user = await repo.findById(target.userId);
+      } else if (target.email) {
+        user = await repo.findByEmail(target.email.toLowerCase());
+      }
+      if (!user) throw new AuthError(404, "not_found", "Account not found.");
+      if (user.emailVerifiedAt) return { ok: true, user: toSelf(user) };
+
+      await verification.verifyCode(user.email, code);
+      const updated = await repo.markEmailVerified(user.id);
+      return { ok: true, user: toSelf(updated ?? user) };
+    },
+
     async login(input: LoginInput, ip: string) {
-      if (await throttle.isLocked(input.email, ip)) {
+      const { identifier, password } = input;
+      if (await throttle.isLocked(identifier, ip)) {
         throw new AuthError(429, "locked", "Too many tries. Wait 15 minutes, then try again.");
       }
-      const user = await repo.findByEmail(input.email);
-      // Same message and same work for unknown email and wrong password, so accounts cannot be probed.
-      const ok = await verifyPassword(user?.passwordHash ?? (await DUMMY_HASH), input.password);
+      // An @ in the identifier means it is an email; otherwise treat it as a username.
+      const isEmail = identifier.includes("@");
+      const user = isEmail
+        ? await repo.findByEmail(identifier.toLowerCase())
+        : await repo.findByUsername(identifier);
+      // Same message and same work for unknown credentials and wrong password — no account probing.
+      const ok = await verifyPassword(user?.passwordHash ?? (await DUMMY_HASH), password);
       if (!user || !ok) {
-        await throttle.fail(input.email, ip);
-        throw new AuthError(401, "bad_credentials", "Email or password is wrong.");
+        await throttle.fail(identifier, ip);
+        throw new AuthError(401, "bad_credentials", "Email / username or password is wrong.");
       }
-      await throttle.succeed(input.email, ip);
+      await throttle.succeed(identifier, ip);
       if (user.bannedAt) throw new AuthError(403, "banned", "This account has been suspended.");
       await repo.touchLastSeen(user.id);
       return { user: toSelf(user), ...(await issueSession(user.id)) };
@@ -87,6 +181,19 @@ export function authService(repo: AuthRepo, throttle: LoginThrottle, analytics?:
 
     async logout(userId: string) {
       await repo.revokeAllRefresh(userId);
+    },
+
+    async isUsernameTaken(username: string) {
+      return !!(await repo.findByUsername(username));
+    },
+
+    async getVerificationStatus(userId: string) {
+      const user = await repo.findById(userId);
+      if (!user) throw new AuthError(401, "unauthorized", "Please log in again.");
+      return {
+        email: user.email,
+        emailVerified: !!user.emailVerifiedAt,
+      };
     },
 
     async me(userId: string) {

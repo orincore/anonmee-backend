@@ -235,3 +235,19 @@ export const matches = pgTable(
   },
   (t) => [index("matches_time_idx").on(t.createdAt)],
 );
+
+export const emailVerificationCodes = pgTable(
+  "email_verification_codes",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    email: varchar("email", { length: 254 }).notNull(),
+    code: varchar("code", { length: 10 }).notNull(),
+    attempts: integer("attempts").notNull().default(0),
+    expiresAt: timestamp("expires_at").notNull(),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("email_verification_email_idx").on(t.email),
+    index("email_verification_expires_idx").on(t.expiresAt),
+  ],
+);

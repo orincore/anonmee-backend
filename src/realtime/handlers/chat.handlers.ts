@@ -5,6 +5,7 @@ import { cleanMessage } from "../../lib/text";
 import type { ChatStore } from "../../modules/chat/chat.store";
 import type { AppServer, AppSocket } from "../context";
 import { HandlerError, handle } from "../handle";
+import type { matchingService } from "../../modules/matching/matching.service";
 
 /**
  * 1:1 chats are delivered to each person's own `u:<id>` group, which their socket joins itself
@@ -19,7 +20,14 @@ export async function endChat(io: AppServer, chats: ChatStore, chatId: string, r
   io.to(bothSides(chat)).emit(EV.chatEnd, { roomId: chatId, reason });
 }
 
-export function registerChatHandlers(socket: AppSocket, io: AppServer, chats: ChatStore, reactions: ReactionsService, onEnded: (chatId: string, reason: string) => void) {
+export function registerChatHandlers(
+  socket: AppSocket,
+  io: AppServer,
+  chats: ChatStore,
+  reactions: ReactionsService,
+  matching: ReturnType<typeof matchingService>,
+  onEnded: (chatId: string, reason: string) => void,
+) {
   const uid = socket.data.userId;
 
   async function member(roomId: string) {
@@ -86,6 +94,25 @@ export function registerChatHandlers(socket: AppSocket, io: AppServer, chats: Ch
     const { chat } = await member(d.roomId);
     await endChat(io, chats, chat.id, "left");
     onEnded(chat.id, "left");
+    ack({ ok: true });
+  });
+
+  handle(socket, EV.chatSkip, roomRefSchema.passthrough(), async (d, ack) => {
+    const { chat } = await member(d.roomId);
+    if (chat.endedAt) throw new HandlerError("chat_ended", "This chat has ended.");
+    const userA = chat.a.userId;
+    const userB = chat.b.userId;
+
+    await endChat(io, chats, chat.id, "skipped");
+    onEnded(chat.id, "skipped");
+
+    io.to(bothSides(chat)).emit("match:waiting", {});
+
+    await Promise.allSettled([
+      matching.join(userA),
+      matching.join(userB),
+    ]);
+
     ack({ ok: true });
   });
 }

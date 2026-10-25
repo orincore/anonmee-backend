@@ -35,7 +35,7 @@ describe("register", () => {
   it("creates an account, sets session cookies, returns only self info", async () => {
     const res = await post("/auth/register", body("ok"));
     expect(res.statusCode).toBe(201);
-    expect(res.json().user).toEqual({ username: `${TAG}_ok`, gender: "female", age: 25 });
+    expect(res.json().user).toEqual({ username: `${TAG}_ok`, gender: "female", age: 25, emailVerified: false });
     expect(Object.keys(cookiesOf(res))).toEqual(expect.arrayContaining(["access", "refresh"]));
     expect(res.body).not.toContain("example.com");
     expect(res.body).not.toContain("dateOfBirth");

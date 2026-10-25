@@ -4,12 +4,15 @@ import type { Db } from "../../db/client";
 import { preferences, refreshTokens, users } from "../../db/schema";
 
 export type UserRow = typeof users.$inferSelect;
-type NewUser = Pick<typeof users.$inferInsert, "email" | "passwordHash" | "username" | "gender" | "dateOfBirth">;
+type NewUser = Pick<typeof users.$inferInsert, "email" | "passwordHash" | "username" | "gender" | "dateOfBirth"> & { emailVerifiedAt?: Date | null };
 
 export function authRepo(db: Db) {
   return {
     async findByEmail(email: string): Promise<UserRow | undefined> {
       return (await db.select().from(users).where(eq(users.email, email)).limit(1))[0];
+    },
+    async findByUsername(username: string): Promise<UserRow | undefined> {
+      return (await db.select().from(users).where(eq(users.username, username)).limit(1))[0];
     },
     async findById(id: string): Promise<UserRow | undefined> {
       return (await db.select().from(users).where(eq(users.id, id)).limit(1))[0];
@@ -60,6 +63,22 @@ export function authRepo(db: Db) {
     },
     async touchLastSeen(id: string) {
       await db.update(users).set({ lastSeenAt: new Date() }).where(eq(users.id, id));
+    },
+    async markEmailVerified(userId: string): Promise<UserRow | undefined> {
+      const [row] = await db
+        .update(users)
+        .set({ emailVerifiedAt: new Date() })
+        .where(eq(users.id, userId))
+        .returning();
+      return row;
+    },
+    async markEmailVerifiedByEmail(email: string): Promise<UserRow | undefined> {
+      const [row] = await db
+        .update(users)
+        .set({ emailVerifiedAt: new Date() })
+        .where(eq(users.email, email.toLowerCase()))
+        .returning();
+      return row;
     },
   };
 }
