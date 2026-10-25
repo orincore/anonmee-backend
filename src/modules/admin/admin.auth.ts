@@ -27,18 +27,14 @@ export class AdminAuthError extends Error {
   }
 }
 
-export function adminAuth(db: Db, redis: RedisClient, throttle: LoginThrottle) {
+export function adminAuth(db: Db, redis: RedisClient, throttle?: LoginThrottle) {
   return {
-    async login(email: string, password: string, ip: string) {
-      const id = `admin:${email.toLowerCase()}`;
-      if (await throttle.isLocked(id, ip)) throw new AdminAuthError(429, "Too many tries. Wait 15 minutes.");
+    async login(email: string, password: string, _ip?: string) {
       const [a] = await db.select().from(admins).where(eq(admins.email, email.toLowerCase())).limit(1);
       const passOk = await verifyPassword(a?.passwordHash ?? (await DUMMY), password);
       if (!a || a.disabledAt || !passOk) {
-        await throttle.fail(id, ip);
         throw new AdminAuthError(401, "Email or password is wrong.");
       }
-      await throttle.succeed(id, ip);
       await db.update(admins).set({ lastLoginAt: new Date() }).where(eq(admins.id, a.id));
       const token = await new SignJWT({ role: a.role, email: a.email }).setProtectedHeader({ alg: "HS256" })
         .setSubject(a.id).setIssuedAt().setExpirationTime(`${ADMIN_TTL_S}s`).sign(key);

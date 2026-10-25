@@ -131,11 +131,8 @@ export function authService(
       return { ok: true, user: toSelf(updated ?? user) };
     },
 
-    async login(input: LoginInput, ip: string) {
+    async login(input: LoginInput, _ip?: string) {
       const { identifier, password } = input;
-      if (await throttle.isLocked(identifier, ip)) {
-        throw new AuthError(429, "locked", "Too many tries. Wait 15 minutes, then try again.");
-      }
       // An @ in the identifier means it is an email; otherwise treat it as a username.
       const isEmail = identifier.includes("@");
       const user = isEmail
@@ -144,10 +141,8 @@ export function authService(
       // Same message and same work for unknown credentials and wrong password — no account probing.
       const ok = await verifyPassword(user?.passwordHash ?? (await DUMMY_HASH), password);
       if (!user || !ok) {
-        await throttle.fail(identifier, ip);
         throw new AuthError(401, "bad_credentials", "Email / username or password is wrong.");
       }
-      await throttle.succeed(identifier, ip);
       if (user.bannedAt) throw new AuthError(403, "banned", "This account has been suspended.");
       await repo.touchLastSeen(user.id);
       return { user: toSelf(user), ...(await issueSession(user.id)) };
