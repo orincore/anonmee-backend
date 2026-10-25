@@ -80,13 +80,18 @@ export function roomsService(db: Db, redis: RedisClient, reactions: ReactionsSer
     return alias;
   }
 
-  async function nextSeq(roomId: string): Promise<number> {
+  async function currentSeq(roomId: string): Promise<number> {
     const key = `room:${roomId}:seq`;
-    if (!(await redis.exists(key))) {
-      const [{ m }] = (await db.select({ m: sql<number>`coalesce(max(${roomMessages.seq}), 0)::int` }).from(roomMessages).where(eq(roomMessages.roomId, roomId))) as [{ m: number }];
-      await redis.set(key, m, "NX");
-    }
-    return redis.incr(key);
+    const val = await redis.get(key);
+    if (val !== null) return Number(val);
+    const [{ m }] = (await db.select({ m: sql<number>`coalesce(max(${roomMessages.seq}), 0)::int` }).from(roomMessages).where(eq(roomMessages.roomId, roomId))) as [{ m: number }];
+    await redis.set(key, m, "NX");
+    return m;
+  }
+
+  async function nextSeq(roomId: string): Promise<number> {
+    await currentSeq(roomId);
+    return redis.incr(`room:${roomId}:seq`);
   }
 
   /** Finds one message in a room: the Redis window first, then Postgres. */
@@ -164,6 +169,7 @@ export function roomsService(db: Db, redis: RedisClient, reactions: ReactionsSer
 
       const seq = await nextSeq(roomId);
       await redis.set(dupKey, seq, "EX", 300);
+      await redis.set(`user:${sender.userId}:read:${roomId}`, seq);
       const message: Pending = { id: randomUUID(), roomId, clientMsgId, seq, alias, gender: sender.gender, age: sender.age, text, at: Date.now(), userId: sender.userId, ...(replyTo ? { replyTo } : {}) };
       const { userId: _omit, ...publicMsg } = message;
       await redis.multi()
@@ -179,6 +185,59 @@ export function roomsService(db: Db, redis: RedisClient, reactions: ReactionsSer
       if (!(await aliasFor(userId, roomId))) throw new RoomError("not_member", "Join the group first.");
       if (!(await findMessage(roomId, messageId))) throw new RoomError("bad_message", "That message is no longer here.");
       return reactions.toggle(roomId, messageId, userId, emoji);
+    },
+
+    getSeq: currentSeq,
+
+    async markRead(userId: string, roomId: string, seq?: number): Promise<{ ok: true; roomId: string; readSeq: number }> {
+      const current = seq !== undefined ? seq : await currentSeq(roomId);
+      await redis.set(`user:${userId}:read:${roomId}`, current);
+      return { ok: true, roomId, readSeq: current };
+    },
+
+    async getUnreads(userId: string): Promise<{ global: number; groups: Record<string, number>; totalGroups: number }> {
+      // 1. Global room
+      let globalUnread = 0;
+      const globalCur = await currentSeq(GLOBAL_ROOM);
+      const userGlobalRead = await redis.get(`user:${userId}:read:${GLOBAL_ROOM}`);
+      if (userGlobalRead === null) {
+        await redis.set(`user:${userId}:read:${GLOBAL_ROOM}`, globalCur);
+      } else {
+        globalUnread = Math.max(0, globalCur - Number(userGlobalRead));
+      }
+
+      // 2. Member groups
+      const joinedIds = [...(await groups.joinedIds(userId))];
+      const groupUnreads: Record<string, number> = {};
+      let totalGroups = 0;
+
+      if (joinedIds.length > 0) {
+        const seqKeys = joinedIds.map((id) => `room:${id}:seq`);
+        const readKeys = joinedIds.map((id) => `user:${userId}:read:${id}`);
+        const [seqVals, readVals] = await Promise.all([
+          redis.mget(...seqKeys),
+          redis.mget(...readKeys),
+        ]);
+
+        for (let i = 0; i < joinedIds.length; i++) {
+          const gid = joinedIds[i]!;
+          let cur = seqVals[i] !== null ? Number(seqVals[i]) : null;
+          if (cur === null) {
+            cur = await currentSeq(gid);
+          }
+          const r = readVals[i];
+          if (r === null) {
+            await redis.set(`user:${userId}:read:${gid}`, cur);
+            groupUnreads[gid] = 0;
+          } else {
+            const count = Math.max(0, cur - Number(r));
+            groupUnreads[gid] = count;
+            totalGroups += count;
+          }
+        }
+      }
+
+      return { global: globalUnread, groups: groupUnreads, totalGroups };
     },
 
     /** Moves queued messages into Postgres in batches. Safe to run on every server at once. */

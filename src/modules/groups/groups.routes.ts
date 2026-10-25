@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { ageFromDob, createGroupSchema } from "../../contracts";
+import { ageFromDob, createGroupSchema, roomReadSchema } from "../../contracts";
 import type { Db } from "../../db/client";
 import { randomAlias } from "../../lib/alias";
 import type { RedisClient } from "../../lib/redis";
@@ -11,6 +11,8 @@ import { moderationRepo } from "../moderation/moderation.repo";
 import { loadPreferences } from "../preferences/preferences.routes";
 import { GroupGone, groupsRepo, type GroupRow } from "./groups.repo";
 import { recommendGroups, type GroupCandidate } from "./groups.recommend";
+import { reactionsService } from "../chat/reactions.service";
+import { roomsService, type RoomsService } from "../chat/rooms.service";
 
 export interface GroupView {
   id: string;
@@ -39,10 +41,11 @@ function decodeCursor(c: string | undefined) {
   return Number.isNaN(at.getTime()) || !id ? undefined : { at, id };
 }
 
-export function groupsRoutes(deps: { db: Db; redis: RedisClient; onCreated: (g: GroupView) => void }) {
+export function groupsRoutes(deps: { db: Db; redis: RedisClient; rooms?: RoomsService; onCreated: (g: GroupView) => void; onLeft?: (groupId: string, userId: string) => void }) {
   const { db, redis } = deps;
   const repo = groupsRepo(db);
   const mod = moderationRepo(db);
+  const rooms = deps.rooms ?? roomsService(db, redis, reactionsService(redis));
 
   async function candidates(): Promise<GroupCandidate[]> {
     const hit = await redis.get("groups:candidates");
@@ -55,6 +58,20 @@ export function groupsRoutes(deps: { db: Db; redis: RedisClient; onCreated: (g: 
   }
 
   return async function (app: FastifyInstance) {
+    app.get("/rooms/unread", async (req, reply) => {
+      const uid = await requireUser(req, reply);
+      if (!uid) return;
+      return rooms.getUnreads(uid);
+    });
+
+    app.post("/rooms/read", async (req, reply) => {
+      const uid = await requireUser(req, reply);
+      if (!uid) return;
+      const p = roomReadSchema.safeParse(req.body);
+      if (!p.success) return reply.code(400).send({ error: "invalid", message: "Bad room read." });
+      return rooms.markRead(uid, p.data.roomId, p.data.seq);
+    });
+
     app.post("/groups", async (req, reply) => {
       const uid = await requireUser(req, reply);
       if (!uid) return;
@@ -147,6 +164,10 @@ export function groupsRoutes(deps: { db: Db; redis: RedisClient; onCreated: (g: 
       if ((await mod.blockedEitherWay(uid)).has(g.ownerId)) return reply.code(403).send({ error: "unavailable", message: "This group is not available to you." });
       try {
         const { alias, alreadyMember } = await repo.join(g.id, uid, randomAlias());
+        if (!alreadyMember) {
+          const cur = await rooms.getSeq(g.id);
+          await rooms.markRead(uid, g.id, cur);
+        }
         await redis.del("groups:candidates");
         return { group: toGroupView({ ...g, memberCount: g.memberCount + (alreadyMember ? 0 : 1) }), alias };
       } catch (e) {
@@ -162,7 +183,9 @@ export function groupsRoutes(deps: { db: Db; redis: RedisClient; onCreated: (g: 
       if (!p.success) return reply.code(404).send({ error: "not_found", message: "That group is gone." });
       await repo.leave(p.data.id, uid);
       await redis.del(`member:${p.data.id}:${uid}`);
+      await redis.del(`user:${uid}:read:${p.data.id}`);
       await redis.del("groups:candidates");
+      deps.onLeft?.(p.data.id, uid);
       return { ok: true };
     });
   };

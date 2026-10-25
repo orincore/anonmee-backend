@@ -24,6 +24,7 @@ export const EV = {
   chatReactions: "chat:reactions",
   roomReact: "room:react",
   roomReactions: "room:reactions",
+  roomRead: "room:read",
   groupCreated: "group:created",
   pulse: "pulse:event",
   error: "error",
@@ -52,6 +53,10 @@ export const reactSchema = z.object({
   emoji: z.enum(REACTIONS),
 });
 export const roomRefSchema = z.object({ roomId: z.string().min(1).max(64) });
+export const roomReadSchema = z.object({
+  roomId: z.string().min(1).max(64),
+  seq: z.number().int().nonnegative().optional(),
+});
 export const resumeSchema = z.object({ roomId: z.string().min(1).max(64), lastSeq: z.number().int().min(0) });
 
 

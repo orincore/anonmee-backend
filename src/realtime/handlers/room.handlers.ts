@@ -1,4 +1,4 @@
-import { chatMessageSchema, EV, reactSchema, roomJoinSchema, roomOlderSchema, roomRefSchema, roomTypingSchema } from "../../contracts";
+import { chatMessageSchema, EV, reactSchema, roomJoinSchema, roomOlderSchema, roomReadSchema, roomRefSchema, roomTypingSchema } from "../../contracts";
 import { ReactionError } from "../../modules/chat/reactions.service";
 import { RoomError, type RoomsService } from "../../modules/chat/rooms.service";
 import type { TypingStore } from "../../modules/chat/typing.store";
@@ -21,6 +21,7 @@ export function registerRoomHandlers(socket: AppSocket, io: AppServer, rooms: Ro
   handle(socket, EV.roomJoin, roomJoinSchema, async (d, ack) => {
     const res = await wrap(() => rooms.join(sender().userId, d.roomId, d.lastSeq));
     await socket.join(`r:${d.roomId}`);
+    void rooms.markRead(sender().userId, d.roomId);
     ack({ ok: true, alias: res.alias, messages: res.messages, hasMore: res.hasMore });
   });
 
@@ -31,13 +32,24 @@ export function registerRoomHandlers(socket: AppSocket, io: AppServer, rooms: Ro
   });
 
   handle(socket, EV.roomLeave, roomRefSchema, async (d, ack) => {
-    await socket.leave(`r:${d.roomId}`);
+    const isMember = d.roomId === "global" || ((await rooms.aliasFor(sender().userId, d.roomId)) !== null);
+    if (!isMember) {
+      await socket.leave(`r:${d.roomId}`);
+    }
     ack({ ok: true });
+  });
+
+  handle(socket, EV.roomRead, roomReadSchema, async (d, ack) => {
+    const res = await rooms.markRead(sender().userId, d.roomId, d.seq);
+    ack(res);
   });
 
   handle(socket, EV.roomMessage, chatMessageSchema, async (d, ack) => {
     const { message, duplicate } = await wrap(() => rooms.post(sender(), d.roomId, d.clientMsgId, d.text, d.replyToId));
-    if (!duplicate) io.to(`r:${d.roomId}`).emit(EV.roomMessage, message);
+    if (!duplicate) {
+      io.to(`r:${d.roomId}`).emit(EV.roomMessage, message);
+      void clearTypingOnMessage(typing, io, d.roomId, sender().userId);
+    }
     ack({ ok: true, seq: message.seq, id: message.id, duplicate });
   });
 
@@ -56,24 +68,8 @@ export function registerRoomHandlers(socket: AppSocket, io: AppServer, rooms: Ro
     if (Date.now() - last < 900) return;
     throttle.set(key, Date.now());
     const typists = await typing.mark(d.roomId, sender().userId, alias);
-    // send to everyone in the room except the typist; each socket filters its own name
     socket.to(`r:${d.roomId}`).emit(EV.roomTyping, { roomId: d.roomId, typists });
-    // also echo to the sender with others only so they can confirm (they will filter themselves anyway)
-    // not needed; we schedule a clear broadcast if they stop
   });
-
-  handle(socket, EV.roomMessage, chatMessageSchema, async (d, ack) => {
-    // Clear typing on message send handled by broadcasting typing clear before message
-    // but duplicate roomMessage handler below handles message; we intercept by clearing here is redundant.
-    // Intentionally not duplicating: clear before emit in main roomMessage handler already exists; add clear there.
-    ack({ ok: true });
-  });
-
-  // Clear typing whenever a room message is posted: wrap the existing post path to emit updated typists.
-  // We patch by listening to successful posts via an extra wrapper is too heavy; instead clear inline
-  // by hooking the original handler result. Easiest: monkey before the original roomMessage emit we already have
-  // is not accessible, so we add a lightweight companion that clears without emitting message again.
-  // Remove the dummy above and rely on the real handler's side effect: we make the real handler also clear typing.
 }
 
 // Helper to be called from the real roomMessage handler after a message is accepted.

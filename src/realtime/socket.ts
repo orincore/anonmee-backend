@@ -20,6 +20,7 @@ import { endChat, registerChatHandlers } from "./handlers/chat.handlers";
 import { registerRoomHandlers } from "./handlers/room.handlers";
 import { reactionsService } from "../modules/chat/reactions.service";
 import { roomsService } from "../modules/chat/rooms.service";
+import { groupsRepo } from "../modules/groups/groups.repo";
 import { registerMatchHandlers } from "./handlers/match.handlers";
 
 const CHAT_GRACE_MS = 30_000;
@@ -99,6 +100,15 @@ export function createRealtime(httpServer: HttpServer, db: Db, redis: RedisClien
     registerRoomHandlers(socket, io, rooms);
     localUsers.set(uid, localCount(uid) + 1);
     await socket.join(`u:${uid}`);
+    await socket.join("r:global");
+    try {
+      const joined = await groupsRepo(db).joinedIds(uid);
+      for (const gid of joined) {
+        await socket.join(`r:${gid}`);
+      }
+    } catch (e) {
+      console.error("failed to join group rooms", e);
+    }
     await presence.touch(uid);
     // Send the current count immediately so the client never waits for the 3-second broadcast interval.
     void presence.count().then((count) => socket.emit(EV.presenceCount, { count }));

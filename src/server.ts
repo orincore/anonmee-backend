@@ -15,11 +15,13 @@ import { createRealtime } from "./realtime/socket";
 /** HTTP API and realtime layer on one server. Used by index.ts and by tests. */
 export async function buildServer(db: Db, redis: RedisClient) {
   let announce: (g: GroupView) => void = () => {};
+  let groupLeft: (groupId: string, userId: string) => void = () => {};
   let moderated: (roomId: string, target: string, kind: "block" | "report", banned: boolean) => void = () => {};
   let banned: (userId: string) => void = () => {};
   const chats = chatStore(redis);
   const app = await buildApp(db, {
     onGroupCreated: (g) => announce(g),
+    onGroupLeft: (gid, uid) => groupLeft(gid, uid),
     peers: peerResolver(db, redis, chats, () => roomsService(db, redis, reactionsService(redis)).flush()),
     onModerated: (...a) => moderated(...a),
     presence: presenceService(redis),
@@ -27,6 +29,7 @@ export async function buildServer(db: Db, redis: RedisClient) {
     onUserBanned: (id) => banned(id),
   });
   const rt = createRealtime(app.server, db, redis, chats);
+  groupLeft = (gid, uid) => void rt.io.in(`u:${uid}`).socketsLeave(`r:${gid}`);
   announce = (g) => {
     rt.io.emit(EV.groupCreated, g);
     // Group titles are public (topic pages list them), so the ticker may show a new one.

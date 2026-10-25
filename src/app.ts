@@ -27,6 +27,7 @@ const SAFE = new Set(["GET", "HEAD", "OPTIONS"]);
 
 export interface AppHooks {
   onGroupCreated?: (g: GroupView) => void;
+  onGroupLeft?: (groupId: string, userId: string) => void;
   peers?: PeerResolver;
   presence?: PresenceService;
   pulse?: PulseService;
@@ -75,7 +76,7 @@ export async function buildApp(db: Db, hooks: AppHooks = {}) {
   await app.register(authRoutes(authService(authRepo(db), loginThrottle(redis), verificationService(redis), analyticsRepo(db)), { onAccountDeleted: (id) => hooks.onUserBanned?.(id) }));
   await app.register(analyticsRoutes(db));
   await app.register(preferencesRoutes(db));
-  await app.register(groupsRoutes({ db, redis, onCreated: (g) => hooks.onGroupCreated?.(g) }));
+  await app.register(groupsRoutes({ db, redis, onCreated: (g) => hooks.onGroupCreated?.(g), onLeft: (gid, uid) => hooks.onGroupLeft?.(gid, uid) }));
   if (hooks.presence && hooks.pulse) {
     await app.register(presenceRoutes(hooks.presence, redis, hooks.pulse, db));
     await app.register(adminRoutes({ db, redis, presence: hooks.presence, onBanned: (id) => hooks.onUserBanned?.(id) }));
