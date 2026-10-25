@@ -31,8 +31,8 @@ const code = (email: string) => {
     step += 1;
   }
 };
-async function login(email: string, extra: Partial<{ password: string; code: string }> = {}) {
-  return srv.app.inject({ method: "POST", url: "/admin/auth/login", payload: { email, password: extra.password ?? PASSWORD, code: extra.code ?? code(email) } });
+async function login(email: string, extra: Partial<{ password: string }> = {}) {
+  return srv.app.inject({ method: "POST", url: "/admin/auth/login", payload: { email, password: extra.password ?? PASSWORD } });
 }
 async function session(email: string) {
   const res = await login(email);
@@ -58,10 +58,9 @@ beforeAll(async () => { await clean(); srv = await startTestServer(); });
 afterAll(async () => { await clean(); await srv.app.close(); });
 
 describe("admin login", () => {
-  it("needs password and a fresh authenticator code", async () => {
+  it("needs valid password", async () => {
     const e = await makeAdmin("login", "owner");
     expect((await login(e, { password: "wrong" })).statusCode).toBe(401);
-    expect((await login(e, { code: "000000" })).statusCode).toBe(401);
     const ok = await login(e);
     expect(ok.statusCode).toBe(200);
     expect(ok.json().admin).toEqual({ email: e, role: "owner" });
@@ -70,16 +69,10 @@ describe("admin login", () => {
     expect(set).toMatch(/SameSite=Strict/i);
     expect(set).toMatch(/Path=\/admin/);
   });
-  it("a code cannot be used twice", async () => {
-    const e = await makeAdmin("replay", "owner");
-    const c = code(e);
-    expect((await login(e, { code: c })).statusCode).toBe(200);
-    expect((await login(e, { code: c })).statusCode).toBe(401);
-  });
   it("gives the same answer for unknown accounts, and locks after repeated failures", async () => {
     const e = await makeAdmin("lock", "moderator");
     const wrong = await login(e, { password: "nope" });
-    const ghost = await login(`${TAG}-ghost@staff.example.com`, { password: "nope", code: "123456" });
+    const ghost = await login(`${TAG}-ghost@staff.example.com`, { password: "nope" });
     expect(ghost.json().message).toBe(wrong.json().message);
     for (let i = 0; i < 5; i++) await login(e, { password: "nope" });
     expect((await login(e)).statusCode).toBe(429);

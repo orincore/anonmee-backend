@@ -29,18 +29,14 @@ export class AdminAuthError extends Error {
 
 export function adminAuth(db: Db, redis: RedisClient, throttle: LoginThrottle) {
   return {
-    async login(email: string, password: string, code: string, ip: string) {
+    async login(email: string, password: string, ip: string) {
       const id = `admin:${email.toLowerCase()}`;
       if (await throttle.isLocked(id, ip)) throw new AdminAuthError(429, "Too many tries. Wait 15 minutes.");
       const [a] = await db.select().from(admins).where(eq(admins.email, email.toLowerCase())).limit(1);
       const passOk = await verifyPassword(a?.passwordHash ?? (await DUMMY), password);
-      // Password and code are checked together so a wrong answer never says which one was wrong.
-      const codeOk = a ? authenticator.check(code, decrypt(a.totpSecretEnc)) : false;
-      // A code works once, even inside its 30 second window.
-      const fresh = codeOk && a && (await redis.set(`admin:totp:${a.id}:${code}`, "1", "EX", 120, "NX")) === "OK";
-      if (!a || a.disabledAt || !passOk || !fresh) {
+      if (!a || a.disabledAt || !passOk) {
         await throttle.fail(id, ip);
-        throw new AdminAuthError(401, "Email, password or code is wrong.");
+        throw new AdminAuthError(401, "Email or password is wrong.");
       }
       await throttle.succeed(id, ip);
       await db.update(admins).set({ lastLoginAt: new Date() }).where(eq(admins.id, a.id));

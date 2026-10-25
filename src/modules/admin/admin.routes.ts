@@ -40,10 +40,10 @@ export function adminRoutes(deps: { db: Db; redis: RedisClient; presence: Presen
     const cookie = { httpOnly: true, secure: env.NODE_ENV === "production", sameSite: "strict" as const, path: "/admin" };
 
     app.post("/admin/auth/login", { config: { rateLimit: { max: env.NODE_ENV === "test" ? 1000 : 10, timeWindow: "1 minute" } } }, async (req, reply) => {
-      const p = z.object({ email: z.string().email().max(254), password: z.string().min(1).max(128), code: z.string().regex(/^\d{6}$/) }).safeParse(req.body);
-      if (!p.success) return reply.code(400).send({ error: "invalid", message: "Enter your email, password and 6 digit code." });
+      const p = z.object({ email: z.string().email().max(254), password: z.string().min(1).max(128) }).safeParse(req.body);
+      if (!p.success) return reply.code(400).send({ error: "invalid", message: "Enter your email and password." });
       try {
-        const { token, admin } = await auth.login(p.data.email, p.data.password, p.data.code, req.ip);
+        const { token, admin } = await auth.login(p.data.email, p.data.password, req.ip);
         reply.setCookie("admin_session", token, { ...cookie, maxAge: ADMIN_TTL_S });
         return { admin };
       } catch (e) {
