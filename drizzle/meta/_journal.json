@@ -71,6 +71,13 @@
       "when": 1792606906855,
       "tag": "0009_overjoyed_the_leader",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1792917324793,
+      "tag": "0010_mature_millenium_guard",
+      "breakpoints": true
     }
   ]
 }
