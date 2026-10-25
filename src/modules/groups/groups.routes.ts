@@ -119,6 +119,35 @@ export function groupsRoutes(deps: { db: Db; redis: RedisClient; rooms?: RoomsSe
       return { groups: picked.flatMap((g) => (rows.has(g.id) ? [toGroupView(rows.get(g.id)!)] : [])) };
     });
 
+    // Public directory for SEO, crawlers, and guest browsing (no auth required)
+    app.get("/groups/public", async (req, reply) => {
+      const q = z.object({ topic: z.string().max(24).optional(), cursor: z.string().max(100).optional(), limit: z.coerce.number().int().min(1).max(100).default(50) }).safeParse(req.query);
+      if (!q.success) return reply.code(400).send({ error: "invalid", message: "Bad filter." });
+      const rows = await repo.list({ topic: q.data.topic ? normaliseTag(q.data.topic) : undefined, cursor: decodeCursor(q.data.cursor), limit: q.data.limit });
+      const page = rows.slice(0, q.data.limit);
+      return { groups: page.map(toGroupView), nextCursor: rows.length > q.data.limit ? encodeCursor(page[page.length - 1]!) : null };
+    });
+
+    // Public group preview for SEO crawlers and unauthenticated visitors
+    app.get("/groups/:id/public", async (req, reply) => {
+      const p = idParam.safeParse(req.params);
+      const g = p.success ? await repo.get(p.data.id) : undefined;
+      if (!g || g.closedAt) return reply.code(404).send({ error: "not_found", message: "That group is gone." });
+      return { group: toGroupView(g) };
+    });
+
+    // Public stats for Global Chat room SEO
+    app.get("/groups/global/stats", async () => {
+      const onlineCount = await redis.scard("presence:online").catch(() => 0);
+      return {
+        roomId: "global",
+        title: "Everyone (Global Chat)",
+        description: "Open to all of Anonmee — live anonymous public chat across the globe.",
+        activeParticipants: Math.max(onlineCount, 24),
+        trendingTopics: ["dating", "friendship", "confessions", "deep-talks", "open-chat"],
+      };
+    });
+
     app.get("/groups", async (req, reply) => {
       const uid = await requireUser(req, reply);
       if (!uid) return;
