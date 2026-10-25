@@ -30,11 +30,15 @@ export const users = pgTable(
     acquisitionCampaign: varchar("acquisition_campaign", { length: 80 }),
     lastSeenAt: timestamp("last_seen_at"),
     bannedAt: timestamp("banned_at"),
+    deviceFingerprint: varchar("device_fingerprint", { length: 64 }),
+    deviceId: varchar("device_id", { length: 64 }),
     createdAt: timestamp("created_at", { precision: 3 }).notNull().defaultNow(),
   },
   (t) => [
     index("users_created_idx").on(t.createdAt, t.id),
     index("users_channel_idx").on(t.acquisitionChannel, t.createdAt),
+    index("users_device_fingerprint_idx").on(t.deviceFingerprint),
+    index("users_device_id_idx").on(t.deviceId),
     check("users_18_plus", sql`${t.dateOfBirth} <= (current_date - interval '18 years')`),
   ],
 );

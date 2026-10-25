@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { env } from "../../config/env";
@@ -8,6 +9,24 @@ import { AuthError, type authService } from "./auth.service";
 type Service = ReturnType<typeof authService>;
 const secure = env.NODE_ENV === "production";
 const cookie = (maxAge: number, path = "/") => ({ httpOnly: true, secure, sameSite: "lax" as const, path, maxAge });
+
+function resolveDevice(req: FastifyRequest, input: { deviceId?: string; deviceFingerprint?: string }) {
+  let deviceId = input.deviceId || req.cookies.anon_did;
+  let deviceFingerprint = input.deviceFingerprint;
+
+  if (!deviceFingerprint || deviceFingerprint.length < 16) {
+    const ip = req.ip || "";
+    const ua = String(req.headers["user-agent"] ?? "");
+    const lang = String(req.headers["accept-language"] ?? "");
+    deviceFingerprint = createHash("sha256").update(`${ip}|${ua}|${lang}`).digest("hex");
+  }
+
+  if (!deviceId || deviceId.length < 16) {
+    deviceId = deviceFingerprint;
+  }
+
+  return { deviceId, deviceFingerprint };
+}
 
 function setSession(reply: FastifyReply, s: { access: string; refresh: string }) {
   reply.setCookie("access", s.access, cookie(ACCESS_TTL_S));
@@ -32,7 +51,18 @@ export function authRoutes(svc: Service, hooks: { onAccountDeleted?: (userId: st
     app.post("/auth/register", limited, async (req, reply) => {
       const parsed = registerSchema.safeParse(req.body);
       if (!parsed.success) return reply.code(400).send({ error: "invalid", message: parsed.error.issues[0]?.message, field: parsed.error.issues[0]?.path[0] });
-      const { user, ...session } = await svc.register(parsed.data);
+      const device = resolveDevice(req, parsed.data);
+      const { user, ...session } = await svc.register({
+        ...parsed.data,
+        deviceId: device.deviceId,
+        deviceFingerprint: device.deviceFingerprint,
+      });
+      reply.setCookie("anon_did", device.deviceId, {
+        path: "/",
+        maxAge: 10 * 365 * 24 * 3600,
+        httpOnly: false,
+        sameSite: "lax",
+      });
       setSession(reply, session);
       return reply.code(201).send({ user });
     });
@@ -41,12 +71,7 @@ export function authRoutes(svc: Service, hooks: { onAccountDeleted?: (userId: st
     app.post("/auth/send-verification", limited, async (req, reply) => {
       const token = req.cookies.access;
       const id = token ? await verifyAccess(token) : null;
-      const parsed = z
-        .object({
-          email: z.string().trim().toLowerCase().email().optional(),
-          username: z.string().trim().optional(),
-        })
-        .safeParse(req.body);
+      const parsed = sendVerificationSchema.safeParse(req.body);
       if (!parsed.success && !id) {
         return reply.code(400).send({ error: "invalid", message: "Enter a valid email address." });
       }
@@ -62,7 +87,20 @@ export function authRoutes(svc: Service, hooks: { onAccountDeleted?: (userId: st
           message: "Please use a trusted email provider (such as Gmail, Outlook, Yahoo, iCloud, or Proton).",
         });
       }
-      const res = await svc.sendVerification({ userId: id ?? undefined, email, username });
+      const device = resolveDevice(req, parsed.success ? parsed.data : {});
+      reply.setCookie("anon_did", device.deviceId, {
+        path: "/",
+        maxAge: 10 * 365 * 24 * 3600,
+        httpOnly: false,
+        sameSite: "lax",
+      });
+      const res = await svc.sendVerification({
+        userId: id ?? undefined,
+        email,
+        username,
+        deviceId: device.deviceId,
+        deviceFingerprint: device.deviceFingerprint,
+      });
       return reply.send(res);
     });
 

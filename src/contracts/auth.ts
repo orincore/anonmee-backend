@@ -165,6 +165,8 @@ export const registerSchema = z.object({
   confirmAdult: z.literal(true, { errorMap: () => ({ message: "Confirm you are 18 or older" }) }),
   verificationToken: z.string().optional(),
   code: z.string().optional(),
+  deviceId: z.string().max(64).optional(),
+  deviceFingerprint: z.string().max(64).optional(),
 });
 
 export const loginSchema = z.object({
@@ -183,6 +185,9 @@ export const verifyEmailSchema = z.object({
 
 export const sendVerificationSchema = z.object({
   email: z.string().trim().toLowerCase().email().optional(),
+  username: z.string().trim().optional(),
+  deviceId: z.string().max(64).optional(),
+  deviceFingerprint: z.string().max(64).optional(),
 });
 
 export type VerifyEmailInput = z.infer<typeof verifyEmailSchema>;

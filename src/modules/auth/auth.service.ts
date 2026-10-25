@@ -50,6 +50,46 @@ export function authService(
       if (taken.email) throw new AuthError(409, "email_taken", "That email is already registered. Try logging in.", "email");
       if (taken.username) throw new AuthError(409, "username_taken", "That username is taken. Try another.", "username");
 
+      // Device fingerprint / multiple fake accounts check
+      const { deviceId, deviceFingerprint } = input;
+      if (deviceId || deviceFingerprint) {
+        const existing = await repo.findAccountsByDevice(deviceId, deviceFingerprint);
+        // 1. Any banned account on this device blocks all new account creation
+        if (existing.some((a) => a.bannedAt !== null)) {
+          throw new AuthError(
+            403,
+            "device_suspended",
+            "This device has been restricted from creating accounts.",
+          );
+        }
+        // 2. Persistent device ID: at most 1 account per browser / device storage
+        if (deviceId && existing.some((a) => a.deviceId === deviceId)) {
+          throw new AuthError(
+            409,
+            "device_limit",
+            "An account is already registered on this device. Please log in to your account.",
+          );
+        }
+        // 3. Hardware fingerprint: at most 1 account per 24 hours
+        const DAY_MS = 24 * 60 * 60 * 1000;
+        const recent = existing.filter((a) => Date.now() - a.createdAt.getTime() < DAY_MS);
+        if (recent.length >= 1) {
+          throw new AuthError(
+            429,
+            "device_cooldown",
+            "An account was already registered on this device recently. Please log in.",
+          );
+        }
+        // 4. Maximum lifetime accounts per hardware fingerprint
+        if (existing.length >= 2) {
+          throw new AuthError(
+            409,
+            "device_limit",
+            "Maximum account limit reached for this device. Please log in to your existing account.",
+          );
+        }
+      }
+
       // Without email verification, account must NOT be created!
       const isTestBypass = env.NODE_ENV === "test" && !input.verificationToken && !input.code;
       if (!isTestBypass) {
@@ -80,6 +120,8 @@ export function authService(
         username: input.username,
         gender: input.gender,
         dateOfBirth: input.dateOfBirth,
+        deviceId: input.deviceId ?? null,
+        deviceFingerprint: input.deviceFingerprint ?? null,
         emailVerifiedAt: new Date(),
       });
 
@@ -88,7 +130,7 @@ export function authService(
       return { user: toSelf(user), ...(await issueSession(user.id)) };
     },
 
-    async sendVerification(target: { userId?: string; email?: string; username?: string }) {
+    async sendVerification(target: { userId?: string; email?: string; username?: string; deviceId?: string; deviceFingerprint?: string }) {
       let email = target.email;
       let username = target.username;
       if (target.userId) {
@@ -105,6 +147,21 @@ export function authService(
         const taken = await repo.emailOrUsernameTaken(email, username ?? "");
         if (taken.email) throw new AuthError(409, "email_taken", "That email is already registered. Try logging in.", "email");
         if (username && taken.username) throw new AuthError(409, "username_taken", "That username is taken. Try another.", "username");
+
+        // Device check before sending verification code
+        if (target.deviceId || target.deviceFingerprint) {
+          const existing = await repo.findAccountsByDevice(target.deviceId, target.deviceFingerprint);
+          if (existing.some((a) => a.bannedAt !== null)) {
+            throw new AuthError(403, "device_suspended", "This device has been restricted from creating accounts.");
+          }
+          if (target.deviceId && existing.some((a) => a.deviceId === target.deviceId)) {
+            throw new AuthError(409, "device_limit", "An account is already registered on this device. Please log in.");
+          }
+          const DAY_MS = 24 * 60 * 60 * 1000;
+          if (existing.filter((a) => Date.now() - a.createdAt.getTime() < DAY_MS).length >= 1) {
+            throw new AuthError(429, "device_cooldown", "An account was already registered on this device recently. Please log in.");
+          }
+        }
       }
       if (!email) throw new AuthError(400, "email_required", "Email address is required.");
       return verification.sendCode(email, username);

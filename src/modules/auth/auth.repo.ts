@@ -4,10 +4,30 @@ import type { Db } from "../../db/client";
 import { preferences, refreshTokens, users } from "../../db/schema";
 
 export type UserRow = typeof users.$inferSelect;
-type NewUser = Pick<typeof users.$inferInsert, "email" | "passwordHash" | "username" | "gender" | "dateOfBirth"> & { emailVerifiedAt?: Date | null };
+type NewUser = Pick<typeof users.$inferInsert, "email" | "passwordHash" | "username" | "gender" | "dateOfBirth"> & {
+  emailVerifiedAt?: Date | null;
+  deviceId?: string | null;
+  deviceFingerprint?: string | null;
+};
 
 export function authRepo(db: Db) {
   return {
+    async findAccountsByDevice(deviceId?: string, deviceFingerprint?: string): Promise<{ id: string; bannedAt: Date | null; createdAt: Date; deviceId: string | null; deviceFingerprint: string | null }[]> {
+      const conditions = [];
+      if (deviceId) conditions.push(eq(users.deviceId, deviceId));
+      if (deviceFingerprint) conditions.push(eq(users.deviceFingerprint, deviceFingerprint));
+      if (conditions.length === 0) return [];
+      return db
+        .select({
+          id: users.id,
+          bannedAt: users.bannedAt,
+          createdAt: users.createdAt,
+          deviceId: users.deviceId,
+          deviceFingerprint: users.deviceFingerprint,
+        })
+        .from(users)
+        .where(or(...conditions));
+    },
     async findByEmail(email: string): Promise<UserRow | undefined> {
       return (await db.select().from(users).where(eq(users.email, email)).limit(1))[0];
     },
