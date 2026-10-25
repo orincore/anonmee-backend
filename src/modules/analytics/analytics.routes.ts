@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { env } from "../../config/env";
 import type { Db } from "../../db/client";
@@ -36,9 +36,9 @@ export function analyticsRoutes(db: Db) {
       return { ok: true, visitId };
     });
 
-    // Short links: /r/ab12cd -> the landing page with full utm tags. The visit itself is counted
+    // Short links: /c/ab12cd and /r/ab12cd -> the landing page with full utm tags. The visit itself is counted
     // when that page loads, so a click is never counted twice.
-    app.get("/r/:code", async (req, reply) => {
+    const handleRedirect = async (req: FastifyRequest, reply: FastifyReply) => {
       const { code } = z.object({ code: z.string().regex(/^[a-z0-9]{4,16}$/) }).catch({ code: "" }).parse(req.params);
       const c = code ? await repo.campaignByCode(code) : undefined;
       const target = new URL(c && c.targetPath.startsWith("/") && !c.targetPath.startsWith("//") ? c.targetPath : "/", env.WEB_ORIGIN);
@@ -50,7 +50,10 @@ export function analyticsRoutes(db: Db) {
         target.searchParams.set("utm_id", c.code);
       }
       return reply.redirect(target.toString(), 302); // origin is fixed to WEB_ORIGIN: never an open redirect
-    });
+    };
+
+    app.get("/c/:code", handleRedirect);
+    app.get("/r/:code", handleRedirect);
   };
 }
 export { analyticsRepo };

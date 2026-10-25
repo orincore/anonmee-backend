@@ -305,7 +305,7 @@ export function adminRoutes(deps: {
         campaigns: page.map((r) => ({
           id: r.id, code: r.code, name: r.name, source: r.source, medium: r.medium, campaign: r.campaign, content: r.content, targetPath: r.targetPath,
           archived: !!r.archivedAt, createdAt: r.createdAt.getTime(),
-          shortLink: `${env.PUBLIC_API_URL}/r/${r.code}`,
+          shortLink: `${env.WEB_ORIGIN}/c/${r.code}`,
           fullUrl: buildCampaignUrl(env.WEB_ORIGIN, { ...r, targetPath: r.targetPath }) + `&utm_id=${r.code}`,
           visits: by.get(r.code)?.visits ?? 0, visitors: by.get(r.code)?.visitors ?? 0, signups: by.get(r.code)?.signups ?? 0,
         })),
@@ -325,7 +325,7 @@ export function adminRoutes(deps: {
       const code = randomBytes(5).toString("hex").slice(0, 7);
       const [row] = await db.insert(campaigns).values({ ...b.data, code, createdBy: s.adminId }).returning();
       await audit(s, "campaign.create", undefined, { code });
-      return reply.code(201).send({ code: row!.code, shortLink: `${env.PUBLIC_API_URL}/r/${row!.code}`, fullUrl: buildCampaignUrl(env.WEB_ORIGIN, { ...b.data }) + `&utm_id=${code}` });
+      return reply.code(201).send({ code: row!.code, shortLink: `${env.WEB_ORIGIN}/c/${row!.code}`, fullUrl: buildCampaignUrl(env.WEB_ORIGIN, { ...b.data }) + `&utm_id=${code}` });
     });
 
     app.post("/admin/campaigns/:id/archive", async (req, reply) => {

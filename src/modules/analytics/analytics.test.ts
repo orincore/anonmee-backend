@@ -74,8 +74,10 @@ describe("sign-up attribution", () => {
 describe("short links", () => {
   it("redirects to the landing page with full tags and never to another site", async () => {
     await db.insert(campaigns).values({ code: "tstok1", name: "Test", source: "reddit", medium: "post", campaign: "launch", targetPath: "/anl-test" });
-    const ok = await app.inject({ method: "GET", url: "/r/tstok1" });
+    const ok = await app.inject({ method: "GET", url: "/c/tstok1" });
     expect(ok.statusCode).toBe(302);
+    const okR = await app.inject({ method: "GET", url: "/r/tstok1" });
+    expect(okR.statusCode).toBe(302);
     const loc = new URL(ok.headers.location as string);
     expect(loc.origin).toBe(WEB());
     expect(loc.pathname).toBe("/anl-test");

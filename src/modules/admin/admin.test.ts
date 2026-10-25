@@ -168,7 +168,7 @@ describe("overview, analytics and campaigns", () => {
     const made = await post(owner.cookie, "/admin/campaigns", { name: "Reddit launch", source: "Reddit", medium: "Post", campaign: "Launch", targetPath: "/" });
     expect(made.statusCode).toBe(201);
     const { code: c, shortLink, fullUrl } = made.json();
-    expect(shortLink).toContain(`/r/${c}`);
+    expect(shortLink).toContain(`/c/${c}`);
     expect(fullUrl).toContain("utm_source=reddit");
     expect(fullUrl).toContain(`utm_id=${c}`);
 
