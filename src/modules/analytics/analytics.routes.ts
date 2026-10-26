@@ -73,7 +73,7 @@ export function analyticsRoutes(db: Db, redis: RedisClient) {
     // Short links: /c/ab12cd and /r/ab12cd -> the landing page with full utm tags. The visit itself is counted
     // when that page loads, so a click is never counted twice.
     const handleRedirect = async (req: FastifyRequest, reply: FastifyReply) => {
-      const { code } = z.object({ code: z.string().regex(/^[a-z0-9]{4,16}$/) }).catch({ code: "" }).parse(req.params);
+      const { code } = z.object({ code: z.string().regex(/^[a-z0-9]{2,16}$/) }).catch({ code: "" }).parse(req.params);
       const c = code ? await repo.campaignByCode(code) : undefined;
       const target = new URL(c && c.targetPath.startsWith("/") && !c.targetPath.startsWith("//") ? c.targetPath : "/", env.WEB_ORIGIN);
       if (c) {
