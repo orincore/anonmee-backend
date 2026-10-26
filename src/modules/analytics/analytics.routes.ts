@@ -3,8 +3,10 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { env } from "../../config/env";
 import type { Db } from "../../db/client";
+import type { RedisClient } from "../../lib/redis";
 import { analyticsRepo } from "./analytics.repo";
 import { classifyVisit, isBot } from "./attribution";
+import { INDEXNOW_KEY } from "./indexnow.service";
 
 const body = z.object({
   /** Full landing URL including utm_ parameters, as the browser sees it. */
@@ -12,10 +14,16 @@ const body = z.object({
   referrer: z.string().max(600).optional(),
 });
 
+const shareBody = z.object({
+  channel: z.enum(["whatsapp", "telegram", "twitter", "reddit", "copy", "native", "other"]),
+  roomId: z.string().trim().max(100).default("unknown"),
+  url: z.string().max(1000).optional(),
+});
+
 /** Do Not Track and Global Privacy Control both mean "do not remember me". */
 const optedOut = (h: Record<string, unknown>) => h["dnt"] === "1" || h["sec-gpc"] === "1";
 
-export function analyticsRoutes(db: Db) {
+export function analyticsRoutes(db: Db, redis: RedisClient) {
   const repo = analyticsRepo(db);
   return async function (app: FastifyInstance) {
     app.post("/track/visit", { config: { rateLimit: { max: 30, timeWindow: "1 minute" } } }, async (req, reply) => {
@@ -34,6 +42,32 @@ export function analyticsRoutes(db: Db) {
       const a = classifyVisit(url, parsed.data.referrer, new URL(env.WEB_ORIGIN).hostname);
       const visitId = await repo.recordVisit({ ...a, visitorId, landingPath: url.pathname });
       return { ok: true, visitId };
+    });
+
+    // Viral share tracking: captures outbound shares (WhatsApp, Telegram, Twitter, Reddit, Link copy, etc.)
+    app.post("/track/share", { config: { rateLimit: { max: 60, timeWindow: "1 minute" } } }, async (req, reply) => {
+      const parsed = shareBody.safeParse(req.body);
+      if (!parsed.success) return reply.code(400).send({ error: "invalid", message: "Bad request." });
+      const { channel, roomId } = parsed.data;
+
+      const today = new Date().toISOString().slice(0, 10);
+      try {
+        await Promise.all([
+          redis.incr("analytics:shares:total"),
+          redis.hincrby("analytics:shares:channels", channel, 1),
+          redis.hincrby("analytics:shares:rooms", roomId, 1),
+          redis.hincrby(`analytics:shares:daily:${today}`, channel, 1),
+        ]);
+      } catch {
+        // do not fail client if Redis counter temporarily hiccups
+      }
+
+      return { ok: true };
+    });
+
+    // IndexNow key verification file served directly by backend as well
+    app.get(`/${INDEXNOW_KEY}.txt`, async (_req, reply) => {
+      return reply.type("text/plain").send(INDEXNOW_KEY);
     });
 
     // Short links: /c/ab12cd and /r/ab12cd -> the landing page with full utm tags. The visit itself is counted

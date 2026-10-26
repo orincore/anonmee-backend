@@ -11,6 +11,7 @@ import {
 import type { RedisClient } from "../../lib/redis";
 import { loginThrottle } from "../../lib/throttle";
 import { buildCampaignUrl } from "../analytics/attribution";
+import { submitToIndexNow } from "../analytics/indexnow.service";
 import type { ActivityService } from "../presence/activity.service";
 import type { PresenceService } from "../presence/presence.service";
 import { ADMIN_TTL_S, AdminAuthError, adminAuth, requireRole, type AdminSession } from "./admin.auth";
@@ -81,7 +82,7 @@ export function adminRoutes(deps: {
       const from = since(days);
       const prev = since(days * 2);
       const n = (q: Promise<{ n: number }[]>) => q.then((r) => r[0]?.n ?? 0);
-      const [totalUsers, newNow, newPrev, banned, matchRows, groupsMade, messages, openReports, daily] = await Promise.all([
+      const [totalUsers, newNow, newPrev, banned, matchRows, groupsMade, messages, openReports, daily, totalShares] = await Promise.all([
         n(db.select({ n: sql<number>`count(*)::int` }).from(users)),
         n(db.select({ n: sql<number>`count(*)::int` }).from(users).where(gte(users.createdAt, from))),
         n(db.select({ n: sql<number>`count(*)::int` }).from(users).where(and(gte(users.createdAt, prev), lt(users.createdAt, from)))),
@@ -99,12 +100,13 @@ export function adminRoutes(deps: {
             (select count(*)::int from users where created_at >= d and created_at < d + interval '1 day') as users,
             (select count(*)::int from matches where created_at >= d and created_at < d + interval '1 day') as matches
           from generate_series(date_trunc('day', ${from.toISOString()}::timestamp), date_trunc('day', now()), interval '1 day') d order by d`),
+        redis.get("analytics:shares:total").then((v) => Number(v || 0)).catch(() => 0),
       ]);
       const m = matchRows[0]!;
       const out = {
         days, totalUsers, newUsers: newNow, newUsersPrevious: newPrev, bannedUsers: banned, onlineNow: await deps.presence.count(),
         matches: m.total, averageWaitMs: m.avgWait, matchSuccessRate: m.ended ? Math.round((m.lasted / m.ended) * 100) : null,
-        groupsCreated: groupsMade, messagesSent: messages, openReports, daily,
+        groupsCreated: groupsMade, messagesSent: messages, openReports, daily, viralShares: totalShares,
       };
       await redis.set(cacheKey, JSON.stringify(out), "EX", 60);
       return out;
@@ -259,7 +261,7 @@ export function adminRoutes(deps: {
       const hit = await redis.get(cacheKey);
       if (hit) return JSON.parse(hit);
       const from = since(days);
-      const [byChannel, signupsByChannel, topSources, topCampaigns, seoDaily, seoPages, llmSources] = await Promise.all([
+      const [byChannel, signupsByChannel, topSources, topCampaigns, seoDaily, seoPages, llmSources, sharesTotalStr, sharesChannelsRaw, sharesRoomsRaw, lastIndexNowRaw] = await Promise.all([
         db.select({ channel: visits.channel, visits: sql<number>`count(*)::int`, visitors: sql<number>`count(distinct ${visits.visitorId})::int` })
           .from(visits).where(gte(visits.createdAt, from)).groupBy(visits.channel),
         db.select({ channel: users.acquisitionChannel, signups: sql<number>`count(*)::int` })
@@ -274,15 +276,71 @@ export function adminRoutes(deps: {
           .where(and(gte(visits.createdAt, from), eq(visits.channel, "seo"))).groupBy(visits.landingPath).orderBy(desc(sql`count(*)`)).limit(10),
         db.select({ source: visits.source, visits: sql<number>`count(*)::int` }).from(visits)
           .where(and(gte(visits.createdAt, from), eq(visits.channel, "llm"))).groupBy(visits.source).orderBy(desc(sql`count(*)`)).limit(10),
+        redis.get("analytics:shares:total").catch(() => null),
+        redis.hgetall("analytics:shares:channels").catch(() => null),
+        redis.hgetall("analytics:shares:rooms").catch(() => null),
+        redis.get("admin:indexnow:last").catch(() => null),
       ]);
       const signups = new Map(signupsByChannel.map((r) => [r.channel, r.signups]));
+      const sharesChannels: Record<string, number> = {};
+      for (const [k, v] of Object.entries(sharesChannelsRaw || {})) {
+        sharesChannels[k] = Number(v) || 0;
+      }
+      const topRooms = Object.entries(sharesRoomsRaw || {})
+        .map(([roomId, count]) => ({ roomId, count: Number(count) || 0 }))
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 10);
+      const lastIndexNow = lastIndexNowRaw ? JSON.parse(lastIndexNowRaw) : null;
+
       const out = {
         days,
         channels: byChannel.map((c) => ({ ...c, signups: signups.get(c.channel) ?? 0, conversion: c.visitors ? Math.round(((signups.get(c.channel) ?? 0) / c.visitors) * 1000) / 10 : 0 })),
         topSources, topCampaigns, seoDaily, seoLandingPages: seoPages, llmSources,
+        shares: {
+          total: Number(sharesTotalStr || 0),
+          byChannel: sharesChannels,
+          topRooms,
+        },
+        lastIndexNow,
       };
       await redis.set(cacheKey, JSON.stringify(out), "EX", 60);
       return out;
+    });
+
+    // ---------- Viral Share Analytics & IndexNow Endpoints ----------
+    app.get("/admin/stats/shares", async (req, reply) => {
+      const s = await requireRole(auth, req, reply, [...ALL]);
+      if (!s) return;
+
+      const [totalStr, byChannelRaw, byRoomRaw, lastIndexNowRaw] = await Promise.all([
+        redis.get("analytics:shares:total").catch(() => null),
+        redis.hgetall("analytics:shares:channels").catch(() => null),
+        redis.hgetall("analytics:shares:rooms").catch(() => null),
+        redis.get("admin:indexnow:last").catch(() => null),
+      ]);
+
+      const total = Number(totalStr || 0);
+      const byChannel: Record<string, number> = {};
+      for (const [k, v] of Object.entries(byChannelRaw || {})) {
+        byChannel[k] = Number(v) || 0;
+      }
+
+      const topRooms = Object.entries(byRoomRaw || {})
+        .map(([roomId, count]) => ({ roomId, count: Number(count) || 0 }))
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 10);
+
+      const lastIndexNow = lastIndexNowRaw ? JSON.parse(lastIndexNowRaw) : null;
+      return { total, byChannel, topRooms, lastIndexNow };
+    });
+
+    app.post("/admin/indexnow/submit", async (req, reply) => {
+      const s = await requireRole(auth, req, reply, [...STAFF]);
+      if (!s) return;
+
+      const result = await submitToIndexNow(env.WEB_ORIGIN, redis, db);
+      await audit(s, "indexnow.submit", undefined, result);
+      return result;
     });
 
     // ---------- Campaign links ----------

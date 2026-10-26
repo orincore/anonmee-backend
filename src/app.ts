@@ -76,7 +76,7 @@ export async function buildApp(db: Db, hooks: AppHooks = {}) {
 
   app.get("/health", async () => ({ ok: true }));
   await app.register(authRoutes(authService(authRepo(db), loginThrottle(redis), verificationService(redis), analyticsRepo(db)), { onAccountDeleted: (id) => hooks.onUserBanned?.(id) }));
-  await app.register(analyticsRoutes(db));
+  await app.register(analyticsRoutes(db, redis));
   await app.register(preferencesRoutes(db));
   await app.register(groupsRoutes({ db, redis, onCreated: (g) => hooks.onGroupCreated?.(g), onLeft: (gid, uid) => hooks.onGroupLeft?.(gid, uid) }));
   if (hooks.presence && hooks.pulse) {
