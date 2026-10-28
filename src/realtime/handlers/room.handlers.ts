@@ -23,7 +23,8 @@ export function registerRoomHandlers(
   typing?: TypingStore,
   activity?: ActivityService,
   globalSim?: GlobalChatSimulator,
-  groupSim?: GroupSimulator
+  groupSim?: GroupSimulator,
+  onViewing?: () => void,
 ) {
   const sender = () => socket.data;
   const throttle = new Map<string, number>();
@@ -31,6 +32,8 @@ export function registerRoomHandlers(
   handle(socket, EV.roomJoin, roomJoinSchema, async (d, ack) => {
     const res = await wrap(() => rooms.join(sender().userId, d.roomId, d.lastSeq));
     await socket.join(`r:${d.roomId}`);
+    await socket.join(`view:${d.roomId}`); // looking at it now: the AI chatter for this room starts or keeps going
+    onViewing?.();
     void rooms.markRead(sender().userId, d.roomId);
     ack({ ok: true, alias: res.alias, messages: res.messages, hasMore: res.hasMore });
   });
@@ -42,6 +45,7 @@ export function registerRoomHandlers(
   });
 
   handle(socket, EV.roomLeave, roomRefSchema, async (d, ack) => {
+    await socket.leave(`view:${d.roomId}`); // stopped looking; global stays joined so unread counts keep working
     const isMember = d.roomId === "global" || ((await rooms.aliasFor(sender().userId, d.roomId)) !== null);
     if (!isMember) {
       await socket.leave(`r:${d.roomId}`);

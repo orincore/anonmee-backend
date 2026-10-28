@@ -1,3 +1,4 @@
+import { z } from "zod";
 import { chatMessageSchema, EV, reactSchema, resumeSchema, roomRefSchema } from "../../contracts";
 import { previewOf } from "../../lib/reply";
 import { ReactionError, type ReactionsService } from "../../modules/chat/reactions.service";
@@ -60,7 +61,7 @@ export function registerChatHandlers(
 
     // AI companion reply in 1:1 chat if peer is bot
     if (matchSim) {
-      void matchSim.handleUserMessage(chat, me, text);
+      matchSim.handleUserMessage(chat, me, text).catch((err) => console.error("AI 1:1 reply failed:", err));
     }
   });
 
@@ -69,12 +70,23 @@ export function registerChatHandlers(
   handle(socket, EV.chatTyping, roomRefSchema, async (d) => {
     const { chat } = await member(d.roomId);
     if (chat.endedAt) return;
+    matchSim?.noteTyping(chat, uid); // an AI user waits for them to finish
     const key = `${uid}:${chat.id}`;
     const now = Date.now();
     const last = typingAt.get(key) ?? 0;
     if (now - last < 1900) return;
     typingAt.set(key, now);
     io.to(`u:${chats.peerOf(chat, uid).userId}`).emit(EV.chatTyping, { roomId: chat.id });
+  });
+
+  // "Which chat am I in?" The client asks on load and on every reconnect. The server also pushes chat:active at
+  // connect, but a push can arrive before the page is listening; this cannot be missed.
+  handle(socket, EV.chatCurrent, z.object({}).passthrough(), async (_d, ack) => {
+    const id = await chats.activeChatId(uid);
+    const chat = id ? await chats.get(id) : null;
+    const me = chat && !chat.endedAt ? chats.sideOf(chat, uid) : null;
+    if (chat && me) return ack({ ok: true, chat: { chatId: chat.id, you: chats.toPeerView(me), peer: chats.toPeerView(chats.peerOf(chat, uid)) }, waiting: false });
+    ack({ ok: true, chat: null, waiting: await matching.isWaiting(uid) });
   });
 
   // Reconnect: join the room again and receive everything after the last message the client saw.

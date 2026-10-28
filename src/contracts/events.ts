@@ -19,6 +19,10 @@ export const EV = {
   roomTyping: "room:typing",
   chatResume: "chat:resume",
   chatActive: "chat:active",
+  /** Ask which 1:1 chat (or queue) this person is in. The client asks on load and on every reconnect, so a missed push cannot lose the chat. */
+  chatCurrent: "chat:current",
+  /** Sent as the page closes, so the server can tell leaving from a quick refresh. */
+  chatLeaving: "chat:leaving",
   roomHistory: "room:history",
   chatReact: "chat:react",
   chatReactions: "chat:reactions",

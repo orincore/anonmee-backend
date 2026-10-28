@@ -24,10 +24,13 @@ import { roomsService } from "../modules/chat/rooms.service";
 import { typingStore } from "../modules/chat/typing.store";
 import { groupsRepo } from "../modules/groups/groups.repo";
 import { registerMatchHandlers } from "./handlers/match.handlers";
-import { GlobalChatSimulator, GroupSimulator, MatchSimulator } from "../modules/simulation";
+import { BotGate, botUsage, GlobalChatSimulator, GroupSimulator, isBotUserId, MatchSimulator } from "../modules/simulation";
 import type { Intent } from "../contracts";
 
-const CHAT_GRACE_MS = 30_000;
+/** How long a dropped connection may take to come back before the chat is given up: a refresh, a tunnel, a phone changing network. */
+const CHAT_GRACE_MS = process.env.NODE_ENV === "test" ? 1500 : 30_000;
+/** The same, when the page said it was closing (pagehide): a refresh still makes it back, a closed tab does not wait half a minute. */
+const LEAVE_GRACE_MS = process.env.NODE_ENV === "test" ? 700 : 15_000;
 const QUEUE_GRACE_MS = 5_000;
 
 export function createRealtime(httpServer: HttpServer, db: Db, redis: RedisClient, chats = chatStore(redis), activity?: ActivityService) {
@@ -64,12 +67,16 @@ export function createRealtime(httpServer: HttpServer, db: Db, redis: RedisClien
     onMatched: onMatchedCb,
   });
 
-  const globalSim = new GlobalChatSimulator(io, redis, rooms, typing);
-  const groupSim = new GroupSimulator(db, redis, rooms, io);
+  // AI companions only run while a real person is connected, and their spend is metered against a daily budget.
+  botUsage.attach(redis);
+  const botGate = new BotGate(io, presence);
+  const globalSim = new GlobalChatSimulator(io, redis, rooms, botGate, typing);
+  const groupSim = new GroupSimulator(db, redis, rooms, io, botGate);
   const matchSim = new MatchSimulator(db, redis, chats, io, onMatchedCb);
 
   globalSim.start();
   groupSim.start();
+  matchSim.start(); // answers any 1:1 message that was left unanswered (restart, crash, stuck request)
 
   // Public namespace: anyone (even signed-out visitors) may watch the online counter, nothing else.
   const publicNs = io.of("/public");
@@ -99,6 +106,28 @@ export function createRealtime(httpServer: HttpServer, db: Db, redis: RedisClien
     return (await io.in(`u:${uid}`).fetchSockets()).length === 0;
   }
 
+  /**
+   * Someone left a 1:1 chat by closing the page and not coming back. That counts as them skipping it: against an AI
+   * user the chat is simply closed; against a person, the chat ends with "peer_left" and that person is put straight
+   * back into matching (behind the normal "connecting you to a new user" screen).
+   */
+  async function leaveChat(chatId: string, leaverId: string) {
+    const chat = await chats.get(chatId);
+    const peer = chat ? chats.peerOf(chat, leaverId) : null;
+    const vsAi = !!peer && isBotUserId(peer.userId);
+    await endChat(io, chats, chatId, peer && !vsAi ? "peer_left" : "disconnected");
+    await endedRecord(chatId, "disconnected");
+    if (vsAi) return void matchSim.chatClosed(chatId);
+    if (!peer) return;
+    try {
+      await matching.join(peer.userId);
+      matchSim.handleUserEnqueued(peer.userId); // an AI user steps in if nobody else turns up
+    } catch {
+      // No preferences set, or already in another chat: let them start matching themselves.
+      io.to(`u:${peer.userId}`).emit(EV.matchTimeout, {});
+    }
+  }
+
   function endedRecord(chatId: string, reason: string) {
     return db.update(matches).set({ endedAt: new Date(), endedReason: reason }).where(eq(matches.id, chatId));
   }
@@ -107,9 +136,16 @@ export function createRealtime(httpServer: HttpServer, db: Db, redis: RedisClien
     const socket = raw as AppSocket;
     const uid = socket.data.userId;
     // Handlers first, with no await before them: a client may emit the instant it connects.
+    let leaving = false;
+    socket.on(EV.chatLeaving, () => {
+      leaving = true; // the page is closing or reloading; if the connection does not come back soon, the chat is over
+    });
     registerMatchHandlers(socket, matching, matchSim);
-    registerChatHandlers(socket, io, chats, reactions, matching, (id, why) => void endedRecord(id, why), activity, matchSim);
-    registerRoomHandlers(socket, io, rooms, typing, activity, globalSim, groupSim);
+    registerChatHandlers(socket, io, chats, reactions, matching, (id, why) => {
+        void endedRecord(id, why);
+        void matchSim.chatClosed(id); // an AI user stops waiting for a person who has left
+      }, activity, matchSim);
+    registerRoomHandlers(socket, io, rooms, typing, activity, globalSim, groupSim, () => botGate.wake());
     socket.on(EV.screenHeartbeat, (data: unknown) => {
       const p = screenHeartbeatSchema.safeParse(data);
       if (p.success && activity) {
@@ -129,6 +165,7 @@ export function createRealtime(httpServer: HttpServer, db: Db, redis: RedisClien
       console.error("failed to join group rooms", e);
     }
     await presence.touch(uid);
+    botGate.wake(); // someone is here: wake any sleeping room at once
     // Send the current count immediately so the client never waits for the 3-second broadcast interval.
     void presence.count().then((count) => socket.emit(EV.presenceCount, { count }));
 
@@ -157,11 +194,8 @@ export function createRealtime(httpServer: HttpServer, db: Db, redis: RedisClien
         if (!(await stillGone(uid))) return;
         await presence.remove(uid);
         const id = await chats.activeChatId(uid);
-        if (id) {
-          await endChat(io, chats, id, "disconnected");
-          await endedRecord(id, "disconnected");
-        }
-      }, CHAT_GRACE_MS).unref();
+        if (id) await leaveChat(id, uid);
+      }, leaving ? LEAVE_GRACE_MS : CHAT_GRACE_MS).unref();
     });
   });
 
@@ -192,6 +226,7 @@ export function createRealtime(httpServer: HttpServer, db: Db, redis: RedisClien
     async close() {
       globalSim.stop();
       groupSim.stop();
+      matchSim.stop();
       timers.forEach(clearInterval);
       await rooms.flush().catch(() => {});
       await io.close();

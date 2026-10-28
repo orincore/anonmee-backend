@@ -109,6 +109,8 @@ export function roomsService(db: Db, redis: RedisClient, reactions: ReactionsSer
 
   return {
     aliasFor,
+    /** The newest `n` messages of a room, oldest first, straight from the Redis window. */
+    recentMessages: async (roomId: string, n = 20): Promise<ChatMessage[]> => (await recent(roomId)).slice(-n),
     forgetMember: (roomId: string, userId: string) => redis.del(`member:${roomId}:${userId}`),
 
     async join(userId: string, roomId: string, lastSeq?: number) {

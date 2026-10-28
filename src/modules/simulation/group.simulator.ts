@@ -1,12 +1,18 @@
 import { randomUUID } from "node:crypto";
-import { and, desc, eq, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import { EV, type ChatMessage } from "../../contracts";
 import type { Db } from "../../db/client";
 import { groupMembers, groups, users } from "../../db/schema";
 import type { RedisClient } from "../../lib/redis";
 import type { RoomsService } from "../chat/rooms.service";
 import type { AppServer } from "../../realtime/context";
-import { getAllPersonas, getRandomPersona, isBotUserId, seedPersonasInDb, selectResponderPersona, SYSTEM_BOT_USER_ID } from "./persona.service";
+import { RoomScript, type RoomScriptHost } from "./script.runner";
+import type { SimulatedPersona, SimulationMessageContext } from "./simulation.types";
+import { getAllPersonas, getPersonaById, isBotUserId, seedPersonasInDb, SYSTEM_BOT_USER_ID } from "./persona.service";
+import type { BotGate } from "./bots.gate";
+import { inCrisis, looksUnderage } from "./chat.safety";
+import { noDashes } from "./chat.texting";
+import { respondAsCrowd } from "./crowd.responder";
 import { generateChatBubbles } from "./together.service";
 
 const GROUP_TEMPLATES = [
@@ -22,20 +28,27 @@ const GROUP_TEMPLATES = [
 
 export class GroupSimulator {
   private timer: NodeJS.Timeout | null = null;
-  private isProcessing = false;
+  private scripts = new Map<string, RoomScript>();
+  private crowdEpochs = new Map<string, number>();
+  private ticks = 0;
 
   constructor(
     private db: Db,
     private redis: RedisClient,
     private rooms: RoomsService,
-    private io: AppServer
+    private io: AppServer,
+    private gate: BotGate,
   ) {}
 
   public start() {
     if (this.timer) return;
-    void this.ensureSystemBotUser();
-    void seedPersonasInDb(this.db);
-    void this.maintainSimulatedGroups();
+    // Personas must exist as users before they can become group members.
+    void (async () => {
+      await this.ensureSystemBotUser();
+      await seedPersonasInDb(this.db);
+      await this.maintainSimulatedGroups();
+      await this.syncScripts();
+    })();
 
     // Check and post messages in groups every 25 - 45 seconds
     this.scheduleNextGroupChat();
@@ -46,13 +59,16 @@ export class GroupSimulator {
       clearTimeout(this.timer);
       this.timer = null;
     }
+    for (const script of this.scripts.values()) script.stop();
+    this.scripts.clear();
   }
 
   private scheduleNextGroupChat() {
-    const delay = Math.floor(25000 + Math.random() * 20000); // 25 to 45 seconds
+    const delay = Math.floor(30000 + Math.random() * 15000); // 30 to 45 seconds
     this.timer = setTimeout(async () => {
       try {
-        await this.stepGroupActivity();
+        if (++this.ticks % 20 === 0) await this.maintainSimulatedGroups(); // roughly every 10 minutes
+        await this.syncScripts();
       } catch (err) {
         console.error("Group simulation error:", err);
       } finally {
@@ -121,167 +137,130 @@ export class GroupSimulator {
     }
   }
 
+  private personaAliases = new Set(getAllPersonas().map((p) => p.alias));
+
+  private toContext(messages: ChatMessage[]): SimulationMessageContext["messages"] {
+    return messages.map((m) => ({ alias: m.alias, gender: m.gender, age: m.age, text: m.text, at: m.at, isReal: !this.personaAliases.has(m.alias) }));
+  }
+
+  /** Adds a persona to a group (idempotent) and primes the alias cache the chat service reads. */
+  private async ensureMember(groupId: string, persona: SimulatedPersona) {
+    await this.db.insert(groupMembers).values({ groupId, userId: persona.id, alias: persona.alias }).onConflictDoNothing();
+    await this.redis.set(`member:${groupId}:${persona.id}`, persona.alias, "EX", 86400 * 7);
+  }
+
+  /** The personas that belong to this group. A group keeps the same few voices, like a real one. */
+  private async castOf(groupId: string): Promise<SimulatedPersona[]> {
+    const ids = getAllPersonas().map((p) => p.id);
+    const rows = await this.db.select({ id: groupMembers.userId }).from(groupMembers).where(and(eq(groupMembers.groupId, groupId), inArray(groupMembers.userId, ids)));
+    return rows.map((r) => getPersonaById(r.id)).filter((p): p is SimulatedPersona => !!p);
+  }
+
+  private async say(groupId: string, persona: SimulatedPersona, text: string, replyToId?: string): Promise<ChatMessage | null> {
+    await this.ensureMember(groupId, persona);
+    this.io.to(`r:${groupId}`).emit(EV.roomTyping, { roomId: groupId, typists: [persona.alias] });
+    await new Promise((r) => setTimeout(r, Math.min(Math.max(text.length * 65, 1200), 3600)));
+    try {
+      const { message, duplicate } = await this.rooms.post({ userId: persona.id, gender: persona.gender, age: persona.age }, groupId, randomUUID(), noDashes(text), replyToId);
+      if (!duplicate) {
+        this.io.to(`r:${groupId}`).emit(EV.roomMessage, message);
+        this.gate.notePosted(`r:${groupId}`); // counts towards the backlog if nobody is looking
+      }
+      return duplicate ? null : message;
+    } finally {
+      this.io.to(`r:${groupId}`).emit(EV.roomTyping, { roomId: groupId, typists: [] });
+    }
+  }
+
   private async createSimulatedGroup(tpl: (typeof GROUP_TEMPLATES)[0]) {
     try {
-      const persona = getRandomPersona();
       const groupId = randomUUID();
-      const members = [persona, getRandomPersona(), getRandomPersona()];
+      const cast = [...getAllPersonas()].sort(() => Math.random() - 0.5).slice(0, 4);
 
-      await this.db.transaction(async (tx) => {
-        await tx.insert(groups).values({
-          id: groupId,
-          ownerId: SYSTEM_BOT_USER_ID,
-          title: tpl.title,
-          topic: tpl.topic,
-          tags: [tpl.topic],
-          description: tpl.description,
-          memberCount: 3 + Math.floor(Math.random() * 8),
-        });
-
-        // Add 2-3 persona members
-        for (const m of members) {
-          await tx.insert(groupMembers).values({
-            groupId,
-            userId: m.id,
-            alias: m.alias,
-          }).onConflictDoNothing();
-          await this.redis.set(`member:${groupId}:${m.id}`, m.alias, "EX", 86400 * 7);
-        }
+      await this.db.insert(groups).values({
+        id: groupId,
+        ownerId: SYSTEM_BOT_USER_ID,
+        title: tpl.title,
+        topic: tpl.topic,
+        tags: [tpl.topic],
+        description: tpl.description,
+        memberCount: 3 + Math.floor(Math.random() * 8),
       });
+      for (const persona of cast) await this.ensureMember(groupId, persona);
 
-      // Seed 2-3 initial chat messages
-      const seedSender = members[0]!;
-      await this.rooms.post(
-        { userId: seedSender.id, gender: seedSender.gender, age: seedSender.age },
-        groupId,
-        randomUUID(),
-        `Hey everyone! Welcome to ${tpl.title} 🙌`
-      );
-
-      const replySender = members[1]!;
-      await this.rooms.post(
-        { userId: replySender.id, gender: replySender.gender, age: replySender.age },
-        groupId,
-        randomUUID(),
-        "Hie! Koi hai yaha abhi live?"
-      );
+      // One opener from one member, written for this group. Only while someone is online: it costs a model call.
+      if (!(await this.gate.open())) return;
+      const opener = cast[0]!;
+      const bubbles = await generateChatBubbles({
+        messages: [],
+        targetPersona: opener,
+        roomType: "group",
+        roomKey: groupId,
+        groupTitle: tpl.title,
+        groupTopic: tpl.topic,
+        topicSeed: tpl.description,
+      });
+      if (bubbles[0]) await this.say(groupId, opener, bubbles[0]);
     } catch (e) {
       console.error("Failed to create simulated group:", e);
     }
   }
 
-  /**
-   * Periodically posts a message to one of the active groups so they feel active.
-   */
-  private async stepGroupActivity() {
-    if (this.isProcessing) return;
-    this.isProcessing = true;
+  private hostFor(g: { id: string; title: string; description: string | null }): RoomScriptHost {
+    return {
+      roomKey: g.id,
+      groupTitle: g.title,
+      topicSeed: g.description ?? undefined,
+      pool: () => this.castOf(g.id),
+      history: () => this.rooms.recentMessages(g.id, 20),
+      say: (persona, text, replyToId) => this.say(g.id, persona, text, replyToId),
+      isPersonaAlias: (alias) => this.personaAliases.has(alias),
+      topic: () => this.scripts.get(g.id)?.currentTopic() ?? null,
+      hasAudience: () => this.gate.hasAudience(`r:${g.id}`),
+      onWake: (cb) => {
+        this.gate.on("wake", cb);
+        return () => void this.gate.off("wake", cb);
+      },
+    };
+  }
 
-    try {
-      const activeGroups = await this.db
-        .select()
-        .from(groups)
-        .where(and(eq(groups.ownerId, SYSTEM_BOT_USER_ID), isNull(groups.closedAt)))
-        .limit(6);
-
-      if (activeGroups.length === 0) return;
-
-      const targetGroup = activeGroups[Math.floor(Math.random() * activeGroups.length)]!;
-      const persona = getRandomPersona();
-
-      // Show typing in that group room
-      this.io.to(`r:${targetGroup.id}`).emit(EV.roomTyping, {
-        roomId: targetGroup.id,
-        typists: [persona.alias],
-      });
-
-      await new Promise((r) => setTimeout(r, 2000 + Math.random() * 1500));
-
-      const bubbles = await generateChatBubbles({
-        messages: [{ alias: persona.alias, text: "hey", isReal: false }],
-        targetPersona: persona,
-        roomType: "group",
-        groupTopic: targetGroup.topic,
-      });
-
-      await this.redis.set(`member:${targetGroup.id}:${persona.id}`, persona.alias, "EX", 86400 * 7);
-      const text = bubbles[0] || "aur batao dosto kya plan hai?";
-      const { message, duplicate } = await this.rooms.post(
-        { userId: persona.id, gender: persona.gender, age: persona.age },
-        targetGroup.id,
-        randomUUID(),
-        text
-      );
-
-      if (!duplicate) {
-        this.io.to(`r:${targetGroup.id}`).emit(EV.roomMessage, message);
+  /** One script per open simulated group; closed groups stop. Cheap, so it is safe to run often. */
+  private async syncScripts() {
+    const open = await this.db
+      .select({ id: groups.id, title: groups.title, topic: groups.topic, description: groups.description })
+      .from(groups)
+      .where(and(eq(groups.ownerId, SYSTEM_BOT_USER_ID), isNull(groups.closedAt)))
+      .limit(8);
+    const openIds = new Set(open.map((g) => g.id));
+    for (const [id, script] of this.scripts) {
+      if (!openIds.has(id)) {
+        script.stop();
+        this.scripts.delete(id);
       }
-
-      this.io.to(`r:${targetGroup.id}`).emit(EV.roomTyping, {
-        roomId: targetGroup.id,
-        typists: [],
-      });
-    } catch (err) {
-      console.error("Error in group simulation step:", err);
-    } finally {
-      this.isProcessing = false;
+    }
+    for (const g of open) {
+      if (this.scripts.has(g.id)) continue;
+      const script = new RoomScript(this.hostFor(g), { minGapMs: 6000, maxGapMs: 20000, humanGraceMs: 20_000 });
+      this.scripts.set(g.id, script);
+      script.start();
     }
   }
 
-  /**
-   * Called when a real user chats in any group room.
-   */
+  /** Called when a real user chats in a group: several members of that group's cast answer with different attitudes. */
   public async handleRealUserGroupMessage(realUser: { userId: string; gender: any; age: number }, message: ChatMessage) {
     if (isBotUserId(realUser.userId) || message.roomId === "global") return;
+    if (looksUnderage(message.text) || inCrisis(message.text)) return; // never engage with someone who may be under 18 or in crisis
 
-    const responder = selectResponderPersona(realUser.gender, [message.alias]);
-
-    setTimeout(async () => {
-      this.io.to(`r:${message.roomId}`).emit(EV.roomTyping, {
-        roomId: message.roomId,
-        typists: [responder.alias],
-      });
-
-      const typingDuration = 2200 + Math.floor(Math.random() * 1800);
-      await new Promise((r) => setTimeout(r, typingDuration));
-
-      try {
-        const bubbles = await generateChatBubbles({
-          messages: [
-            {
-              alias: message.alias,
-              gender: message.gender,
-              age: message.age,
-              text: message.text,
-              isReal: true,
-            },
-          ],
-          targetPersona: responder,
-          realUserGender: realUser.gender,
-          roomType: "group",
-        });
-
-        await this.redis.set(`member:${message.roomId}:${responder.id}`, responder.alias, "EX", 86400 * 7);
-        const replyText = bubbles[0] || "sahi baat hai haha";
-        const { message: replyMsg, duplicate } = await this.rooms.post(
-          { userId: responder.id, gender: responder.gender, age: responder.age },
-          message.roomId,
-          randomUUID(),
-          replyText,
-          message.id
-        );
-
-        if (!duplicate) {
-          this.io.to(`r:${message.roomId}`).emit(EV.roomMessage, replyMsg);
-        }
-      } catch (err) {
-        console.error("Error replying to real user in group:", err);
-      } finally {
-        this.io.to(`r:${message.roomId}`).emit(EV.roomTyping, {
-          roomId: message.roomId,
-          typists: [],
-        });
-      }
-    }, 1500 + Math.random() * 2000);
+    const script = this.scripts.get(message.roomId);
+    script?.noteHuman(message.text); // their topic is held for 15 minutes; planned chatter is dropped, this person is answered first
+    const epoch = (this.crowdEpochs.get(message.roomId) ?? 0) + 1;
+    this.crowdEpochs.set(message.roomId, epoch);
+    try {
+      const [group] = await this.db.select({ id: groups.id, title: groups.title, description: groups.description }).from(groups).where(eq(groups.id, message.roomId)).limit(1);
+      if (!group || (await this.castOf(group.id)).length === 0) return; // not one of our groups
+      await respondAsCrowd({ host: this.hostFor(group), roomType: "group", message, userGender: realUser.gender, isCurrent: () => this.crowdEpochs.get(message.roomId) === epoch });
+    } catch (err) {
+      console.error("Error replying to real user in group:", err);
+    }
   }
 }

@@ -5,3 +5,5 @@ export * from "./together.service";
 export * from "./global.simulator";
 export * from "./group.simulator";
 export * from "./match.simulator";
+export * from "./bots.gate";
+export * from "./usage.meter";

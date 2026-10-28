@@ -29,6 +29,12 @@ const schema = z
   SMTP_FROM: z.string().default("Anonmee <no-reply@anonmee.orincore.com>"),
   TOGETHER_API_KEY: z.string().default(""),
   TOGETHER_MODEL: z.string().default("deepseek-ai/DeepSeek-V4.1-Flash-1017"),
+  /** Kill switch for every AI companion. */
+  BOTS_ENABLED: z.enum(["true", "false"]).default("true").transform((v) => v === "true"),
+  /** Hard stop for AI spend per UTC day, in tokens (input + output). 2M is roughly one US dollar. */
+  BOTS_DAILY_TOKEN_BUDGET: z.coerce.number().int().min(0).default(2_000_000),
+  /** AI chatter pauses when more real people than this are online (they keep each other busy). 0 means no limit. */
+  BOTS_MAX_HUMANS_ONLINE: z.coerce.number().int().min(0).default(0),
   })
   .superRefine((e, ctx) => {
     if (e.NODE_ENV !== "production") return;

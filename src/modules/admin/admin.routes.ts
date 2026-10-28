@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { and, asc, desc, eq, gt, gte, ilike, isNull, lt, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, ilike, isNull, like, lt, notLike, or, sql } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { env } from "../../config/env";
@@ -14,6 +14,9 @@ import { buildCampaignUrl } from "../analytics/attribution";
 import { submitToIndexNow } from "../analytics/indexnow.service";
 import type { ActivityService } from "../presence/activity.service";
 import type { PresenceService } from "../presence/presence.service";
+import { AI_FLAG_PREFIX, SEVERE_PREFIX } from "../simulation/chat.hostility";
+import { SYSTEM_BOT_USER_ID } from "../simulation/persona.service";
+import { botUsage } from "../simulation/usage.meter";
 import { ADMIN_TTL_S, AdminAuthError, adminAuth, requireRole, type AdminSession } from "./admin.auth";
 
 const ALL = ["owner", "moderator", "analyst"] as const;
@@ -116,15 +119,21 @@ export function adminRoutes(deps: {
     app.get("/admin/escalations", async (req, reply) => {
       const s = await requireRole(auth, req, reply, [...STAFF]);
       if (!s) return;
-      const q = pageQ.extend({ status: z.enum(["open", "reviewed", "actioned", "dismissed"]).default("open") }).parse(req.query);
+      const q = pageQ.extend({
+        status: z.enum(["open", "reviewed", "actioned", "dismissed"]).default("open"),
+        /** "severe" is the AI-flagged threats the screen pins at the top; "normal" is everything else. */
+        severity: z.enum(["all", "severe", "normal"]).default("all"),
+      }).parse(req.query);
       const c = dec(q.cursor);
+      const severe = like(reports.reason, `${SEVERE_PREFIX}%`);
       const where = and(
         eq(reports.status, q.status),
+        q.severity === "severe" ? severe : q.severity === "normal" ? notLike(reports.reason, `${SEVERE_PREFIX}%`) : undefined,
         c ? or(gt(reports.createdAt, c.at), and(eq(reports.createdAt, c.at), gt(reports.id, c.id))) : undefined,
       );
       const rows = await db.select({
         id: reports.id, reason: reports.reason, evidence: reports.evidence, status: reports.status, roomId: reports.roomId, createdAt: reports.createdAt,
-        reportedId: reports.reportedId, username: users.username, gender: users.gender, dob: users.dateOfBirth, bannedAt: users.bannedAt,
+        reporterId: reports.reporterId, reportedId: reports.reportedId, username: users.username, gender: users.gender, dob: users.dateOfBirth, bannedAt: users.bannedAt,
         reporters: sql<number>`(select count(distinct r2.reporter_id)::int from reports r2 where r2.reported_id = ${reports.reportedId})`,
       }).from(reports).innerJoin(users, eq(users.id, reports.reportedId))
         .where(where).orderBy(asc(reports.createdAt), asc(reports.id)).limit(q.limit + 1);
@@ -132,6 +141,9 @@ export function adminRoutes(deps: {
       return {
         escalations: page.map((r) => ({
           id: r.id, reason: r.reason, evidence: r.evidence, status: r.status, createdAt: r.createdAt.getTime(), roomId: r.roomId,
+          // Filed by an AI user after it warned or left a person; staff decide what happens next.
+          aiFlagged: r.reporterId === SYSTEM_BOT_USER_ID || r.reason.startsWith(AI_FLAG_PREFIX),
+          severe: r.reason.startsWith(SEVERE_PREFIX),
           reported: { id: r.reportedId, username: r.username, gender: r.gender, age: ageFromDob(r.dob), banned: !!r.bannedAt, distinctReporters: r.reporters },
         })),
         nextCursor: rows.length > q.limit ? enc(page[page.length - 1]!.createdAt, page[page.length - 1]!.id) : null,
@@ -250,6 +262,15 @@ export function adminRoutes(deps: {
         limit: z.coerce.number().int().min(5).max(100).default(20),
       }).parse(req.query);
       return activity.getActivityAnalytics(q.days, q.search, q.page, q.limit);
+    });
+
+    // ---------- AI companion spend ----------
+    /** Tokens and estimated cost per day, split by kind (background script, room reply, 1:1 chat), against the daily budget. */
+    app.get("/admin/bots/usage", async (req, reply) => {
+      const s = await requireRole(auth, req, reply, [...ALL]);
+      if (!s) return;
+      const { days } = z.object({ days: z.coerce.number().int().min(1).max(31).default(7) }).parse(req.query);
+      return { enabled: env.BOTS_ENABLED, ...(await botUsage.report(days)) };
     });
 
     // ---------- Traffic analytics ----------

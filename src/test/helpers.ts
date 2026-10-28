@@ -29,6 +29,8 @@ export async function makeUser(
     payload: {
       email: `${tag}-${n}@example.com`, password: "correct horse 9", username: `${tag}_${n}`,
       gender: o.gender ?? "female", dateOfBirth: o.dob ?? "1998-06-01", confirmAdult: true,
+      // Every test user is a different person on a different phone: one account per device is a real rule.
+      deviceId: `dev-${tag}-${n}`.padEnd(16, "0").slice(0, 64), deviceFingerprint: `fp-${tag}-${n}`.padEnd(16, "0").slice(0, 64),
     },
   });
   if (res.statusCode !== 201) throw new Error(`register failed: ${res.body}`);

@@ -3,6 +3,7 @@ import { sql } from "drizzle-orm";
 import type { Gender } from "../../contracts";
 import type { Db } from "../../db/client";
 import { randomAlias } from "../../lib/alias";
+import { rollPersonality } from "./chat.persona";
 import type { SimulatedPersona } from "./simulation.types";
 
 export const BOT_UUID_PREFIX = "00000000-0000-4000-a001-";
@@ -34,6 +35,25 @@ const MALE_PERSONAS: Array<Omit<SimulatedPersona, "id">> = [
   { alias: "Calm Raven 96", gender: "male", age: 26, vibe: "night_owl", interests: ["books", "indie_music", "coffee"] },
 ];
 
+/** Every gender the app offers is in the room: trans women, trans men, non-binary people and people who prefer not to say. */
+const TRANS_WOMAN_PERSONAS: Array<Omit<SimulatedPersona, "id">> = [
+  { alias: "Rosy Magpie 27", gender: "trans_woman", age: 24, vibe: "flirty", interests: ["fashion", "music", "late_night"] },
+  { alias: "Lunar Heron 61", gender: "trans_woman", age: 23, vibe: "witty", interests: ["movies", "comedy", "books"] },
+  { alias: "Sugar Lynx 84", gender: "trans_woman", age: 26, vibe: "bubbly", interests: ["dance", "food", "travel"] },
+];
+const TRANS_MAN_PERSONAS: Array<Omit<SimulatedPersona, "id">> = [
+  { alias: "Rusty Stag 33", gender: "trans_man", age: 25, vibe: "chill", interests: ["gym", "gaming", "chai"] },
+  { alias: "Jade Ocelot 77", gender: "trans_man", age: 22, vibe: "playful", interests: ["memes", "football", "anime"] },
+];
+const NON_BINARY_PERSONAS: Array<Omit<SimulatedPersona, "id">> = [
+  { alias: "Ember Gecko 40", gender: "non_binary", age: 23, vibe: "night_owl", interests: ["art", "deep_talks", "indie_music"] },
+  { alias: "Misty Ibis 19", gender: "non_binary", age: 24, vibe: "witty", interests: ["coding", "philosophy", "coffee"] },
+  { alias: "Cobalt Finch 66", gender: "non_binary", age: 21, vibe: "playful", interests: ["design", "dance", "memes"] },
+];
+const PREFER_NOT_TO_SAY_PERSONAS: Array<Omit<SimulatedPersona, "id">> = [
+  { alias: "Quiet Moth 52", gender: "prefer_not_to_say", age: 25, vibe: "chill", interests: ["books", "night_talks", "chai"] },
+];
+
 // Persistent pool mapping id -> SimulatedPersona
 const personaMap = new Map<string, SimulatedPersona>();
 
@@ -46,6 +66,15 @@ function initPersonas() {
     const id = `${BOT_UUID_PREFIX}0000000002${String(idx + 1).padStart(2, "0")}`;
     personaMap.set(id, { id, ...p });
   });
+  const others: [string, Array<Omit<SimulatedPersona, "id">>][] = [
+    ["03", TRANS_WOMAN_PERSONAS], ["04", TRANS_MAN_PERSONAS], ["05", NON_BINARY_PERSONAS], ["06", PREFER_NOT_TO_SAY_PERSONAS],
+  ];
+  for (const [group, list] of others) {
+    list.forEach((p, idx) => {
+      const id = `${BOT_UUID_PREFIX}00000000${group}${String(idx + 1).padStart(2, "0")}`;
+      personaMap.set(id, { id, ...p });
+    });
+  }
 }
 
 initPersonas();
@@ -62,7 +91,7 @@ export function getPersonaById(id: string): SimulatedPersona | undefined {
  * Returns a random persona from the pool.
  * Respects 60% female / 40% male ratio overall by default.
  */
-export function getRandomPersona(preferredGender?: "female" | "male"): SimulatedPersona {
+export function getRandomPersona(preferredGender?: Gender): SimulatedPersona {
   const all = getAllPersonas();
   if (preferredGender) {
     const filtered = all.filter((p) => p.gender === preferredGender);
@@ -71,9 +100,10 @@ export function getRandomPersona(preferredGender?: "female" | "male"): Simulated
     }
   }
 
-  // 60% female / 40% male general ratio
-  const isFemale = Math.random() < 0.60;
-  const targetGender = isFemale ? "female" : "male";
+  // About one in six is someone who is not a man or a woman; the rest split 60 / 40.
+  const others = all.filter((p) => p.gender !== "female" && p.gender !== "male");
+  if (others.length && Math.random() < 0.16) return others[Math.floor(Math.random() * others.length)]!;
+  const targetGender = Math.random() < 0.6 ? "female" : "male";
   const pool = all.filter((p) => p.gender === targetGender);
   return pool[Math.floor(Math.random() * pool.length)] ?? all[0]!;
 }
@@ -85,7 +115,7 @@ export function getRandomPersona(preferredGender?: "female" | "male"): Simulated
  * - Avoids using the user's own id/alias.
  */
 export function selectResponderPersona(realUserGender?: Gender, excludeAliases: string[] = []): SimulatedPersona {
-  let targetGender: "female" | "male";
+  let targetGender: Gender;
 
   if (realUserGender === "male") {
     // 70% female attention, 30% male attention
@@ -95,6 +125,12 @@ export function selectResponderPersona(realUserGender?: Gender, excludeAliases: 
   } else {
     // Other/unspecified: 60% female, 40% male
     targetGender = Math.random() < 0.60 ? "female" : "male";
+  }
+
+  // Someone who is not a man or a woman joins in about one time in six.
+  if (Math.random() < 0.16) {
+    const others = getAllPersonas().filter((p) => p.gender !== "female" && p.gender !== "male" && !excludeAliases.includes(p.alias));
+    if (others.length) return others[Math.floor(Math.random() * others.length)]!;
   }
 
   const candidates = getAllPersonas().filter(
@@ -111,13 +147,12 @@ export function selectResponderPersona(realUserGender?: Gender, excludeAliases: 
 /**
  * Creates a dynamic persona with fresh alias for 1-on-1 match if needed.
  */
-export function createDynamicPersona(gender: "female" | "male", minAge = 20, maxAge = 25): SimulatedPersona {
+export function createDynamicPersona(gender: Gender, minAge = 20, maxAge = 25): SimulatedPersona {
   const age = Math.min(Math.max(Math.floor(minAge + Math.random() * (maxAge - minAge + 1)), 18), 35);
   const rawUuid = randomUUID();
   const id = `${BOT_UUID_PREFIX}${rawUuid.slice(BOT_UUID_PREFIX.length)}`;
   const alias = randomAlias();
-  const vibes: SimulatedPersona["vibe"][] = ["flirty", "playful", "bubbly", "chill", "witty", "night_owl"];
-  const vibe = vibes[Math.floor(Math.random() * vibes.length)]!;
+  const { vibe, disposition, quirk, flirt } = rollPersonality();
 
   const persona: SimulatedPersona = {
     id,
@@ -126,6 +161,9 @@ export function createDynamicPersona(gender: "female" | "male", minAge = 20, max
     age,
     interests: ["music", "movies", "late_night", "chats", "confessions"],
     vibe,
+    disposition,
+    quirk,
+    flirt,
   };
 
   personaMap.set(id, persona);
@@ -168,4 +206,26 @@ export async function seedPersonasInDb(db: Db) {
       // ignore
     }
   }
+}
+
+const BOT_GENDER_WEIGHTS: [Gender, number][] = [
+  ["female", 0.4], ["male", 0.3], ["trans_woman", 0.1], ["trans_man", 0.07], ["non_binary", 0.1], ["prefer_not_to_say", 0.03],
+];
+
+/** Picks the gender of a 1:1 AI match from the genders the person said they want to meet. */
+export function pickBotGender(wantGenders: readonly Gender[], rng: () => number = Math.random): Gender {
+  const allowed = BOT_GENDER_WEIGHTS.filter(([g]) => wantGenders.includes(g));
+  const pool = allowed.length ? allowed : BOT_GENDER_WEIGHTS;
+  let roll = rng() * pool.reduce((sum, [, w]) => sum + w, 0);
+  for (const [g, w] of pool) if ((roll -= w) <= 0) return g;
+  return pool[pool.length - 1]![0];
+}
+
+/** The account AI users file reports under. Made on demand so a flag never fails on a missing row. */
+export async function ensureSystemBotUser(db: Db) {
+  await db.execute(sql`
+    INSERT INTO users (id, email, password_hash, username, gender, date_of_birth, created_at)
+    VALUES (${SYSTEM_BOT_USER_ID}::uuid, 'system.bot@anonmee.in', 'dummy_hash_for_sim_system_bot', 'anonmeebot', 'female'::gender, '2002-05-15'::date, now())
+    ON CONFLICT (id) DO NOTHING
+  `);
 }
