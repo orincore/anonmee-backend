@@ -1,3 +1,4 @@
+import { randomInt } from "node:crypto";
 import type { RedisClient } from "../../lib/redis";
 import { sendVerificationEmail } from "../../lib/email";
 import { AuthError } from "./auth.service";
@@ -12,7 +13,15 @@ const CODE_TTL_MS = 15 * 60 * 1000; // 15 minutes
 const RESEND_COOLDOWN_MS = 60 * 1000; // 60 seconds
 const MAX_ATTEMPTS = 5;
 
-export function verificationService(redis?: RedisClient) {
+interface Options {
+  /** Redis key namespace, so signup codes and password reset codes never collide. */
+  keyPrefix?: string;
+  send?: (to: string, code: string, username?: string) => Promise<unknown>;
+}
+
+export function verificationService(redis?: RedisClient, opts: Options = {}) {
+  const keyPrefix = opts.keyPrefix ?? "email";
+  const send = opts.send ?? sendVerificationEmail;
   // In-memory fallback in case Redis is unavailable
   const memoryStore = new Map<string, StoredCode>();
   const memoryCooldown = new Map<string, number>();
@@ -36,7 +45,7 @@ export function verificationService(redis?: RedisClient) {
     const e = norm(email);
     if (redis && redis.status === "ready") {
       try {
-        const raw = await redis.get(`email_verify:${e}`);
+        const raw = await redis.get(`${keyPrefix}_verify:${e}`);
         if (!raw) return null;
         return JSON.parse(raw) as StoredCode;
       } catch {
@@ -57,7 +66,7 @@ export function verificationService(redis?: RedisClient) {
     memoryStore.set(e, data);
     if (redis && redis.status === "ready") {
       try {
-        await redis.set(`email_verify:${e}`, JSON.stringify(data), "PX", CODE_TTL_MS);
+        await redis.set(`${keyPrefix}_verify:${e}`, JSON.stringify(data), "PX", CODE_TTL_MS);
       } catch {
         // Ignored, memory store will serve
       }
@@ -69,7 +78,7 @@ export function verificationService(redis?: RedisClient) {
     memoryStore.delete(e);
     if (redis && redis.status === "ready") {
       try {
-        await redis.del(`email_verify:${e}`);
+        await redis.del(`${keyPrefix}_verify:${e}`);
       } catch {
         // Ignored
       }
@@ -80,7 +89,7 @@ export function verificationService(redis?: RedisClient) {
     const e = norm(email);
     if (redis && redis.status === "ready") {
       try {
-        const ttl = await redis.pttl(`email_resend:${e}`);
+        const ttl = await redis.pttl(`${keyPrefix}_resend:${e}`);
         if (ttl > 0) return Math.ceil(ttl / 1000);
       } catch {
         // Fall back to memory
@@ -101,7 +110,7 @@ export function verificationService(redis?: RedisClient) {
     memoryCooldown.set(e, Date.now() + RESEND_COOLDOWN_MS);
     if (redis && redis.status === "ready") {
       try {
-        await redis.set(`email_resend:${e}`, "1", "PX", RESEND_COOLDOWN_MS);
+        await redis.set(`${keyPrefix}_resend:${e}`, "1", "PX", RESEND_COOLDOWN_MS);
       } catch {
         // Ignored
       }
@@ -119,12 +128,12 @@ export function verificationService(redis?: RedisClient) {
       }
 
       // Generate a secure 6-digit numeric OTP code
-      const code = Math.floor(100000 + Math.random() * 900000).toString();
+      const code = randomInt(100000, 1000000).toString();
       await setStored(e, { code, createdAt: Date.now(), attempts: 0 });
       await setCooldown(e);
 
       // Send the code through Brevo SMTP
-      await sendVerificationEmail(e, code, username);
+      await send(e, code, username);
 
       return { ok: true, message: "Verification code sent to your email.", cooldown: 60 };
     },

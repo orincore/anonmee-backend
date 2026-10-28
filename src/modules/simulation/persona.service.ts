@@ -1,7 +1,12 @@
 import { randomUUID } from "node:crypto";
+import { sql } from "drizzle-orm";
 import type { Gender } from "../../contracts";
+import type { Db } from "../../db/client";
 import { randomAlias } from "../../lib/alias";
 import type { SimulatedPersona } from "./simulation.types";
+
+export const BOT_UUID_PREFIX = "00000000-0000-4000-a001-";
+export const SYSTEM_BOT_USER_ID = "00000000-0000-0000-0000-000000000001";
 
 const FEMALE_PERSONAS: Array<Omit<SimulatedPersona, "id">> = [
   { alias: "Velvet Fox 23", gender: "female", age: 22, vibe: "flirty", interests: ["music", "late_night", "movies"] },
@@ -34,11 +39,11 @@ const personaMap = new Map<string, SimulatedPersona>();
 
 function initPersonas() {
   FEMALE_PERSONAS.forEach((p, idx) => {
-    const id = `bot:female:${idx + 1}`;
+    const id = `${BOT_UUID_PREFIX}0000000001${String(idx + 1).padStart(2, "0")}`;
     personaMap.set(id, { id, ...p });
   });
   MALE_PERSONAS.forEach((p, idx) => {
-    const id = `bot:male:${idx + 1}`;
+    const id = `${BOT_UUID_PREFIX}0000000002${String(idx + 1).padStart(2, "0")}`;
     personaMap.set(id, { id, ...p });
   });
 }
@@ -108,7 +113,8 @@ export function selectResponderPersona(realUserGender?: Gender, excludeAliases: 
  */
 export function createDynamicPersona(gender: "female" | "male", minAge = 20, maxAge = 25): SimulatedPersona {
   const age = Math.min(Math.max(Math.floor(minAge + Math.random() * (maxAge - minAge + 1)), 18), 35);
-  const id = `bot:dyn:${randomUUID()}`;
+  const rawUuid = randomUUID();
+  const id = `${BOT_UUID_PREFIX}${rawUuid.slice(BOT_UUID_PREFIX.length)}`;
   const alias = randomAlias();
   const vibes: SimulatedPersona["vibe"][] = ["flirty", "playful", "bubbly", "chill", "witty", "night_owl"];
   const vibe = vibes[Math.floor(Math.random() * vibes.length)]!;
@@ -127,5 +133,39 @@ export function createDynamicPersona(gender: "female" | "male", minAge = 20, max
 }
 
 export function isBotUserId(userId: string): boolean {
-  return userId.startsWith("bot:") || userId.startsWith("sim:");
+  return (
+    userId.startsWith(BOT_UUID_PREFIX) ||
+    userId.startsWith("bot:") ||
+    userId.startsWith("sim:") ||
+    userId === SYSTEM_BOT_USER_ID
+  );
+}
+
+/**
+ * Seeds all persona accounts in the users table so foreign key constraints in room_messages and group_members succeed.
+ */
+export async function seedPersonasInDb(db: Db) {
+  const personas = getAllPersonas();
+  for (const p of personas) {
+    try {
+      const email = `bot.${p.alias.toLowerCase().replace(/[^a-z0-9]/g, "")}@anonmee.in`;
+      const username = `bot_${p.alias.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 16)}`;
+      const dob = `${2026 - p.age}-01-01`;
+      await db.execute(sql`
+        INSERT INTO users (id, email, password_hash, username, gender, date_of_birth, created_at)
+        VALUES (
+          ${p.id}::uuid,
+          ${email},
+          'dummy_hash_for_sim_persona',
+          ${username},
+          ${p.gender}::gender,
+          ${dob}::date,
+          now()
+        )
+        ON CONFLICT (id) DO NOTHING
+      `);
+    } catch {
+      // ignore
+    }
+  }
 }

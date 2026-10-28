@@ -28,7 +28,8 @@ export const mailTransporter = nodemailer.createTransport({
  * - 6-digit OTP code styled with high contrast monospace digits
  * - Feature pills: "Dating & Flirting", "Make Real Friends", "Stranger Chat", "No Photo Pressure"
  */
-export function buildVerificationEmailHtml(code: string, username?: string): string {
+export function buildVerificationEmailHtml(code: string, username?: string, purpose: "verify" | "reset" = "verify"): string {
+  const reset = purpose === "reset";
   const year = new Date().getFullYear();
 
   return `<!DOCTYPE html>
@@ -36,7 +37,7 @@ export function buildVerificationEmailHtml(code: string, username?: string): str
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${code} is your Anonmee verification code</title>
+  <title>${code} is your Anonmee ${reset ? "password reset" : "verification"} code</title>
 </head>
 <body style="margin: 0; padding: 0; background-color: #f4f4f8; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #14111c; -webkit-font-smoothing: antialiased;">
   <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background-color: #f4f4f8; padding: 36px 16px;">
@@ -71,18 +72,18 @@ export function buildVerificationEmailHtml(code: string, username?: string): str
                     
                     <!-- Poster Headline -->
                     <h1 style="margin: 0 0 12px 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 24px; font-weight: 900; color: #14111c; letter-spacing: -0.5px; line-height: 1.15; text-align: center;">
-                      Verify your email.<br/>
+                      ${reset ? "Reset your password." : "Verify your email."}<br/>
                       Stay <span style="background-color: #ffa07e; border: 2px solid #14111c; border-radius: 8px; padding: 2px 8px; display: inline-block; transform: rotate(-1deg); -webkit-transform: rotate(-1deg); box-shadow: 2px 2px 0 0 #14111c;">anonymous.</span>
                     </h1>
 
                     <p style="margin: 0 0 20px 0; font-size: 15px; line-height: 1.5; color: #595666; text-align: center;">
-                      ${username ? `Hey <strong>${username}</strong>, ` : "Hey there, "}enter this 6-digit code in the signup wizard to verify your email. <strong>No account is created until this code is entered.</strong>
+                      ${username ? `Hey <strong>${username}</strong>, ` : "Hey there, "}${reset ? "enter this 6-digit code to choose a new password. <strong>Anonmee staff will never ask you for it.</strong>" : "enter this 6-digit code in the signup wizard to verify your email. <strong>No account is created until this code is entered.</strong>"}
                     </p>
 
                     <!-- The 6-Digit OTP Sticker Box -->
                     <div style="background-color: #ffa07e; border: 2.5px solid #14111c; border-radius: 16px; box-shadow: 4px 4px 0 0 #14111c; padding: 20px 12px; text-align: center; margin: 24px 0;">
                       <p style="margin: 0 0 4px 0; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 1.5px; color: #14111c;">
-                        Verification Code
+                        ${reset ? "Password Reset Code" : "Verification Code"}
                       </p>
                       <span style="font-family: 'SF Mono', Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; font-size: 38px; font-weight: 900; letter-spacing: 10px; color: #14111c; display: block; padding-left: 10px;">
                         ${code}
@@ -108,7 +109,7 @@ export function buildVerificationEmailHtml(code: string, username?: string): str
                     <!-- Microcopy & Expiry -->
                     <div style="border-top: 2px dashed rgba(20, 17, 28, 0.15); margin-top: 20px; padding-top: 16px; text-align: center;">
                       <p style="margin: 0; font-size: 13px; font-weight: 600; color: #595666;">
-                        &#9201; Valid for <strong>15 minutes</strong>. If you did not request this code, simply disregard this email.
+                        &#9201; Valid for <strong>15 minutes</strong>. ${reset ? "If you did not ask to reset your password, ignore this email and your password stays the same." : "If you did not request this code, simply disregard this email."}
                       </p>
                     </div>
 
@@ -180,6 +181,27 @@ export async function sendVerificationEmail(
         `[Brevo Warning] Brevo returned 525 Unauthorized IP address. To enable direct delivery, add your IP in Brevo Dashboard > SMTP & API > Authorized IPs. The code was logged above for verification.`
       );
     }
+    return { success: false, error: errorMsg };
+  }
+}
+
+/** Sends the 6-digit password reset code. Same transport and logging rules as the verification email. */
+export async function sendPasswordResetEmail(to: string, code: string, username?: string): Promise<{ success: boolean; error?: string }> {
+  if (env.NODE_ENV !== "production") console.log(`[Anonmee Password Reset] To: ${to} Code: ${code}`);
+  if (env.NODE_ENV === "test") return { success: true };
+
+  try {
+    await mailTransporter.sendMail({
+      from: env.SMTP_FROM,
+      to,
+      subject: `${code} is your Anonmee password reset code`,
+      text: `Your Anonmee password reset code is: ${code}\n\nIt expires in 15 minutes. If you did not ask to reset your password, ignore this email and your password stays the same.\n\n--\nAnonmee Team\nhttps://anonmee.orincore.com`,
+      html: buildVerificationEmailHtml(code, username, "reset"),
+    });
+    return { success: true };
+  } catch (err: unknown) {
+    const errorMsg = err instanceof Error ? err.message : String(err);
+    console.warn(`[Brevo SMTP Notice] Could not deliver password reset email: ${errorMsg}`);
     return { success: false, error: errorMsg };
   }
 }

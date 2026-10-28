@@ -84,6 +84,9 @@ export function authRepo(db: Db) {
     async touchLastSeen(id: string) {
       await db.update(users).set({ lastSeenAt: new Date() }).where(eq(users.id, id));
     },
+    async updatePassword(userId: string, passwordHash: string) {
+      await db.update(users).set({ passwordHash }).where(eq(users.id, userId));
+    },
     async markEmailVerified(userId: string): Promise<UserRow | undefined> {
       const [row] = await db
         .update(users)

@@ -11,7 +11,8 @@ import {
 } from "../../lib/tokens";
 import type { LoginThrottle } from "../../lib/throttle";
 import type { AuthRepo, UserRow } from "./auth.repo";
-import type { VerificationService } from "./verification.service";
+import { sendPasswordResetEmail } from "../../lib/email";
+import { verificationService, type VerificationService } from "./verification.service";
 
 // Verified against when the email is unknown, so unknown and known accounts take equally long.
 const DUMMY_HASH = hashPassword("anonme-timing-equaliser");
@@ -36,7 +37,8 @@ export function authService(
   repo: AuthRepo,
   throttle: LoginThrottle,
   verification: VerificationService,
-  analytics?: { attributeSignup(visitId: string, userId: string): Promise<void> }
+  analytics?: { attributeSignup(visitId: string, userId: string): Promise<void> },
+  resetCodes: VerificationService = verificationService(undefined, { keyPrefix: "pwreset", send: sendPasswordResetEmail }),
 ) {
   async function issueSession(userId: string) {
     const refresh = newRefreshToken();
@@ -203,6 +205,31 @@ export function authService(
       if (user.bannedAt) throw new AuthError(403, "banned", "This account has been suspended.");
       await repo.touchLastSeen(user.id);
       return { user: toSelf(user), ...(await issueSession(user.id)) };
+    },
+
+    /**
+     * Emails a reset code if the address belongs to an account. The caller always gets the same answer,
+     * so this cannot be used to find out who has an account.
+     */
+    async requestPasswordReset(email: string) {
+      const user = await repo.findByEmail(email);
+      if (!user) return;
+      try {
+        await resetCodes.sendCode(email, user.username);
+      } catch (e) {
+        if (!(e instanceof AuthError && e.code === "cooldown")) throw e;
+      }
+    },
+
+    /** Checks the emailed code, sets the new password and signs the account out everywhere. */
+    async resetPassword(email: string, code: string, newPassword: string) {
+      await resetCodes.verifyCode(email, code);
+      const user = await repo.findByEmail(email);
+      if (!user) throw new AuthError(400, "code_expired", "Reset code has expired or is invalid. Please request a new code.");
+      await repo.updatePassword(user.id, await hashPassword(newPassword));
+      await repo.revokeAllRefresh(user.id);
+      // They just proved they own the inbox.
+      if (!user.emailVerifiedAt) await repo.markEmailVerified(user.id);
     },
 
     async refresh(refreshToken: string) {

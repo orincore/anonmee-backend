@@ -23,6 +23,7 @@ import { authRepo } from "./modules/auth/auth.repo";
 import { authRoutes } from "./modules/auth/auth.routes";
 import { AuthError, authService } from "./modules/auth/auth.service";
 import { verificationService } from "./modules/auth/verification.service";
+import { sendPasswordResetEmail } from "./lib/email";
 
 const SAFE = new Set(["GET", "HEAD", "OPTIONS"]);
 
@@ -75,7 +76,7 @@ export async function buildApp(db: Db, hooks: AppHooks = {}) {
   });
 
   app.get("/health", async () => ({ ok: true }));
-  await app.register(authRoutes(authService(authRepo(db), loginThrottle(redis), verificationService(redis), analyticsRepo(db)), { onAccountDeleted: (id) => hooks.onUserBanned?.(id) }));
+  await app.register(authRoutes(authService(authRepo(db), loginThrottle(redis), verificationService(redis), analyticsRepo(db), verificationService(redis, { keyPrefix: "pwreset", send: sendPasswordResetEmail })), { onAccountDeleted: (id) => hooks.onUserBanned?.(id) }));
   await app.register(analyticsRoutes(db, redis));
   await app.register(preferencesRoutes(db));
   await app.register(groupsRoutes({ db, redis, onCreated: (g) => hooks.onGroupCreated?.(g), onLeft: (gid, uid) => hooks.onGroupLeft?.(gid, uid) }));

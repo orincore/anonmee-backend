@@ -179,6 +179,17 @@ export const loginSchema = z.object({
   password: z.string().min(1).max(128),
 });
 
+export const forgotPasswordSchema = z.object({
+  email: z.string().trim().toLowerCase().email("Enter a valid email address").max(254),
+});
+
+export const resetPasswordSchema = forgotPasswordSchema.extend({
+  code: z.string().trim().regex(/^\d{6}$/, "Enter the 6-digit code"),
+  password: registerSchema.shape.password,
+});
+
+export type ForgotPasswordInput = z.infer<typeof forgotPasswordSchema>;
+export type ResetPasswordInput = z.infer<typeof resetPasswordSchema>;
 export type RegisterInput = z.infer<typeof registerSchema>;
 export type LoginInput = z.infer<typeof loginSchema>;
 

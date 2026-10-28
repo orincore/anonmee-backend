@@ -71,6 +71,7 @@ describe("Simulation System", () => {
     });
 
     it("correctly identifies bot user ids", () => {
+      expect(isBotUserId("00000000-0000-4000-a001-000000000101")).toBe(true);
       expect(isBotUserId("bot:female:1")).toBe(true);
       expect(isBotUserId("sim:dyn:123")).toBe(true);
       expect(isBotUserId("123e4567-e89b-12d3-a456-426614174000")).toBe(false);

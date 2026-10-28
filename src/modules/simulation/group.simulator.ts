@@ -6,10 +6,8 @@ import { groupMembers, groups, users } from "../../db/schema";
 import type { RedisClient } from "../../lib/redis";
 import type { RoomsService } from "../chat/rooms.service";
 import type { AppServer } from "../../realtime/context";
-import { getAllPersonas, getRandomPersona, isBotUserId, selectResponderPersona } from "./persona.service";
+import { getAllPersonas, getRandomPersona, isBotUserId, seedPersonasInDb, selectResponderPersona, SYSTEM_BOT_USER_ID } from "./persona.service";
 import { generateChatBubbles } from "./together.service";
-
-export const SYSTEM_BOT_USER_ID = "00000000-0000-0000-0000-000000000001";
 
 const GROUP_TEMPLATES = [
   { title: "Late Night Talks ✨", topic: "dating", description: "Bore ho rahe ho? Aa jao baatein karte hain, no judgments." },
@@ -36,6 +34,7 @@ export class GroupSimulator {
   public start() {
     if (this.timer) return;
     void this.ensureSystemBotUser();
+    void seedPersonasInDb(this.db);
     void this.maintainSimulatedGroups();
 
     // Check and post messages in groups every 25 - 45 seconds
@@ -126,6 +125,7 @@ export class GroupSimulator {
     try {
       const persona = getRandomPersona();
       const groupId = randomUUID();
+      const members = [persona, getRandomPersona(), getRandomPersona()];
 
       await this.db.transaction(async (tx) => {
         await tx.insert(groups).values({
@@ -139,18 +139,18 @@ export class GroupSimulator {
         });
 
         // Add 2-3 persona members
-        const members = [persona, getRandomPersona(), getRandomPersona()];
         for (const m of members) {
           await tx.insert(groupMembers).values({
             groupId,
-            userId: SYSTEM_BOT_USER_ID,
+            userId: m.id,
             alias: m.alias,
           }).onConflictDoNothing();
+          await this.redis.set(`member:${groupId}:${m.id}`, m.alias, "EX", 86400 * 7);
         }
       });
 
       // Seed 2-3 initial chat messages
-      const seedSender = getRandomPersona();
+      const seedSender = members[0]!;
       await this.rooms.post(
         { userId: seedSender.id, gender: seedSender.gender, age: seedSender.age },
         groupId,
@@ -158,7 +158,7 @@ export class GroupSimulator {
         `Hey everyone! Welcome to ${tpl.title} 🙌`
       );
 
-      const replySender = getRandomPersona(seedSender.gender === "female" ? "male" : "female");
+      const replySender = members[1]!;
       await this.rooms.post(
         { userId: replySender.id, gender: replySender.gender, age: replySender.age },
         groupId,
@@ -204,6 +204,7 @@ export class GroupSimulator {
         groupTopic: targetGroup.topic,
       });
 
+      await this.redis.set(`member:${targetGroup.id}:${persona.id}`, persona.alias, "EX", 86400 * 7);
       const text = bubbles[0] || "aur batao dosto kya plan hai?";
       const { message, duplicate } = await this.rooms.post(
         { userId: persona.id, gender: persona.gender, age: persona.age },
@@ -260,6 +261,7 @@ export class GroupSimulator {
           roomType: "group",
         });
 
+        await this.redis.set(`member:${message.roomId}:${responder.id}`, responder.alias, "EX", 86400 * 7);
         const replyText = bubbles[0] || "sahi baat hai haha";
         const { message: replyMsg, duplicate } = await this.rooms.post(
           { userId: responder.id, gender: responder.gender, age: responder.age },

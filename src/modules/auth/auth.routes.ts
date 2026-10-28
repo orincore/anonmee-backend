@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { env } from "../../config/env";
-import { isReputedEmail, loginSchema, registerSchema, sendVerificationSchema, verifyEmailSchema } from "../../contracts";
+import { forgotPasswordSchema, isReputedEmail, resetPasswordSchema, loginSchema, registerSchema, sendVerificationSchema, verifyEmailSchema } from "../../contracts";
 import { ACCESS_TTL_S, REFRESH_TTL_S, verifyAccess } from "../../lib/tokens";
 import { AuthError, type authService } from "./auth.service";
 
@@ -144,6 +144,24 @@ export function authRoutes(svc: Service, hooks: { onAccountDeleted?: (userId: st
       const { user, ...session } = await svc.login(parsed.data, req.ip);
       setSession(reply, session);
       return { user };
+    });
+
+    /** Always answers the same way, whether or not the email has an account. */
+    app.post("/auth/forgot-password", limited, async (req, reply) => {
+      const parsed = forgotPasswordSchema.safeParse(req.body);
+      if (!parsed.success) return reply.code(400).send({ error: "invalid", message: "Enter a valid email address.", field: "email" });
+      await svc.requestPasswordReset(parsed.data.email);
+      return { ok: true, cooldown: 60, message: "If that email has an account, a reset code is on its way." };
+    });
+
+    app.post("/auth/reset-password", limited, async (req, reply) => {
+      const parsed = resetPasswordSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return reply.code(400).send({ error: "invalid", message: parsed.error.issues[0]?.message, field: parsed.error.issues[0]?.path[0] });
+      }
+      await svc.resetPassword(parsed.data.email, parsed.data.code, parsed.data.password);
+      reply.clearCookie("access", { path: "/" }).clearCookie("refresh", { path: "/auth" });
+      return { ok: true };
     });
 
     /** Quick check used by the sign-up form to tell the user whether a username is taken. */
