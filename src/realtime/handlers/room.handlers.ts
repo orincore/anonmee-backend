@@ -3,6 +3,7 @@ import type { ActivityService } from "../../modules/presence/activity.service";
 import { ReactionError } from "../../modules/chat/reactions.service";
 import { RoomError, type RoomsService } from "../../modules/chat/rooms.service";
 import type { TypingStore } from "../../modules/chat/typing.store";
+import type { GlobalChatSimulator, GroupSimulator } from "../../modules/simulation";
 import type { AppServer, AppSocket } from "../context";
 import { HandlerError, handle } from "../handle";
 
@@ -15,7 +16,15 @@ const wrap = async <T>(fn: () => Promise<T>): Promise<T> => {
   }
 };
 
-export function registerRoomHandlers(socket: AppSocket, io: AppServer, rooms: RoomsService, typing?: TypingStore, activity?: ActivityService) {
+export function registerRoomHandlers(
+  socket: AppSocket,
+  io: AppServer,
+  rooms: RoomsService,
+  typing?: TypingStore,
+  activity?: ActivityService,
+  globalSim?: GlobalChatSimulator,
+  groupSim?: GroupSimulator
+) {
   const sender = () => socket.data;
   const throttle = new Map<string, number>();
 
@@ -51,6 +60,13 @@ export function registerRoomHandlers(socket: AppSocket, io: AppServer, rooms: Ro
       io.to(`r:${d.roomId}`).emit(EV.roomMessage, message);
       void clearTypingOnMessage(typing, io, d.roomId, sender().userId);
       if (activity) void activity.recordMessageSent(sender().userId);
+
+      // Trigger AI responder simulation for real user messages in global or group rooms
+      if (d.roomId === "global" && globalSim) {
+        void globalSim.handleRealUserMessage(sender(), message);
+      } else if (d.roomId !== "global" && groupSim) {
+        void groupSim.handleRealUserGroupMessage(sender(), message);
+      }
     }
     ack({ ok: true, seq: message.seq, id: message.id, duplicate });
   });

@@ -7,6 +7,7 @@ import type { ChatStore } from "../../modules/chat/chat.store";
 import type { AppServer, AppSocket } from "../context";
 import { HandlerError, handle } from "../handle";
 import type { matchingService } from "../../modules/matching/matching.service";
+import type { MatchSimulator } from "../../modules/simulation";
 
 /**
  * 1:1 chats are delivered to each person's own `u:<id>` group, which their socket joins itself
@@ -29,6 +30,7 @@ export function registerChatHandlers(
   matching: ReturnType<typeof matchingService>,
   onEnded: (chatId: string, reason: string) => void,
   activity?: ActivityService,
+  matchSim?: MatchSimulator,
 ) {
   const uid = socket.data.userId;
 
@@ -55,6 +57,11 @@ export function registerChatHandlers(
     io.to(bothSides(chat)).emit(EV.chatMessage, msg);
     if (activity) void activity.recordMessageSent(uid);
     ack({ ok: true, seq: msg.seq, id: msg.id });
+
+    // AI companion reply in 1:1 chat if peer is bot
+    if (matchSim) {
+      void matchSim.handleUserMessage(chat, me, text);
+    }
   });
 
   // Throttle typing to once per 2s per chat, per CLAUDE 5.6. Real-time, accurate, with Redis-less per-socket bucket.

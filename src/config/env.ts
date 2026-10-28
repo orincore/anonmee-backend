@@ -27,6 +27,8 @@ const schema = z
   SMTP_USER: z.string().default(""),
   SMTP_PASS: z.string().default(""),
   SMTP_FROM: z.string().default("Anonmee <no-reply@anonmee.orincore.com>"),
+  TOGETHER_API_KEY: z.string().default(""),
+  TOGETHER_MODEL: z.string().default("deepseek-ai/DeepSeek-V4.1-Flash-1017"),
   })
   .superRefine((e, ctx) => {
     if (e.NODE_ENV !== "production") return;

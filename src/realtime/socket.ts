@@ -21,8 +21,11 @@ import { endChat, registerChatHandlers } from "./handlers/chat.handlers";
 import { registerRoomHandlers } from "./handlers/room.handlers";
 import { reactionsService } from "../modules/chat/reactions.service";
 import { roomsService } from "../modules/chat/rooms.service";
+import { typingStore } from "../modules/chat/typing.store";
 import { groupsRepo } from "../modules/groups/groups.repo";
 import { registerMatchHandlers } from "./handlers/match.handlers";
+import { GlobalChatSimulator, GroupSimulator, MatchSimulator } from "../modules/simulation";
+import type { Intent } from "../contracts";
 
 const CHAT_GRACE_MS = 30_000;
 const QUEUE_GRACE_MS = 5_000;
@@ -42,6 +45,7 @@ export function createRealtime(httpServer: HttpServer, db: Db, redis: RedisClien
   io.adapter(createAdapter(pub, sub));
   const presence = presenceService(redis);
   const reactions = reactionsService(redis);
+  const typing = typingStore(redis);
   const rooms = roomsService(db, redis, reactions);
   const notifier: MatchNotifier = {
     found(userId, p) {
@@ -50,15 +54,22 @@ export function createRealtime(httpServer: HttpServer, db: Db, redis: RedisClien
     timeout: (userId) => void io.to(`u:${userId}`).emit(EV.matchTimeout, {}),
   };
   const pulse = pulseService(redis);
+  const onMatchedCb = (intent: Intent) => {
+    const e = { kind: "match" as const, intent: groupOfIntent(intent), at: Date.now() };
+    void pulse.record(e);
+    io.of("/public").emit(EV.pulse, e);
+  };
   const matching = matchingService({
     db, redis, chats, moderation: moderationRepo(db), notify: notifier,
-    // The landing page ticker only learns that a chat of some kind started, never who was in it.
-    onMatched: (intent) => {
-      const e = { kind: "match" as const, intent: groupOfIntent(intent), at: Date.now() };
-      void pulse.record(e);
-      io.of("/public").emit(EV.pulse, e);
-    },
+    onMatched: onMatchedCb,
   });
+
+  const globalSim = new GlobalChatSimulator(io, redis, rooms, typing);
+  const groupSim = new GroupSimulator(db, redis, rooms, io);
+  const matchSim = new MatchSimulator(db, redis, chats, io, onMatchedCb);
+
+  globalSim.start();
+  groupSim.start();
 
   // Public namespace: anyone (even signed-out visitors) may watch the online counter, nothing else.
   const publicNs = io.of("/public");
@@ -96,9 +107,9 @@ export function createRealtime(httpServer: HttpServer, db: Db, redis: RedisClien
     const socket = raw as AppSocket;
     const uid = socket.data.userId;
     // Handlers first, with no await before them: a client may emit the instant it connects.
-    registerMatchHandlers(socket, matching);
-    registerChatHandlers(socket, io, chats, reactions, matching, (id, why) => void endedRecord(id, why), activity);
-    registerRoomHandlers(socket, io, rooms, undefined, activity);
+    registerMatchHandlers(socket, matching, matchSim);
+    registerChatHandlers(socket, io, chats, reactions, matching, (id, why) => void endedRecord(id, why), activity, matchSim);
+    registerRoomHandlers(socket, io, rooms, typing, activity, globalSim, groupSim);
     socket.on(EV.screenHeartbeat, (data: unknown) => {
       const p = screenHeartbeatSchema.safeParse(data);
       if (p.success && activity) {
@@ -139,6 +150,7 @@ export function createRealtime(httpServer: HttpServer, db: Db, redis: RedisClien
       else localUsers.delete(uid);
       setTimeout(async () => {
         if (!(await stillGone(uid))) return;
+        matchSim.cancelWait(uid);
         await matching.leave(uid);
       }, QUEUE_GRACE_MS).unref();
       setTimeout(async () => {
@@ -178,6 +190,8 @@ export function createRealtime(httpServer: HttpServer, db: Db, redis: RedisClien
       await endedRecord(chatId, reason);
     },
     async close() {
+      globalSim.stop();
+      groupSim.stop();
       timers.forEach(clearInterval);
       await rooms.flush().catch(() => {});
       await io.close();
