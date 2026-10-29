@@ -125,6 +125,7 @@ export const roomMessages = pgTable(
   },
   (t) => [
     index("room_messages_created_idx").on(t.createdAt), // retention purge
+    index("room_messages_user_idx").on(t.userId, t.createdAt, t.id), // admin: one person's messages, newest first
     uniqueIndex("room_messages_room_seq_uq").on(t.roomId, t.seq),
     uniqueIndex("room_messages_dedupe_uq").on(t.roomId, t.userId, t.clientMsgId),
   ],
@@ -238,7 +239,11 @@ export const matches = pgTable(
     endedReason: varchar("ended_reason", { length: 20 }), // left | reported | blocked | disconnected
     createdAt: timestamp("created_at").notNull().defaultNow(),
   },
-  (t) => [index("matches_time_idx").on(t.createdAt)],
+  (t) => [
+    index("matches_time_idx").on(t.createdAt),
+    index("matches_user_a_idx").on(t.userAId, t.createdAt, t.id), // admin: one person's chats
+    index("matches_user_b_idx").on(t.userBId, t.createdAt, t.id),
+  ],
 );
 
 export const emailVerificationCodes = pgTable(

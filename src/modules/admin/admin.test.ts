@@ -2,10 +2,11 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { authenticator } from "otplib";
 import { eq, like } from "drizzle-orm";
 import { db } from "../../db/client";
-import { adminAudit, admins, campaigns, reports, users, visits } from "../../db/schema";
+import { adminAudit, admins, campaigns, reports, roomMessages, users, visits } from "../../db/schema";
 import { redis } from "../../lib/redis";
 import { encrypt } from "../../lib/crypto";
 import { hashPassword } from "../../lib/password";
+import { BOT_UUID_PREFIX } from "../simulation/persona.service";
 import { cleanTag, makeUser, startTestServer } from "../../test/helpers";
 
 const TAG = "admt";
@@ -129,6 +130,28 @@ describe("users and escalations", () => {
     expect((await get(owner.cookie, "/admin/users/not-a-uuid")).statusCode).toBe(404);
   });
 
+  it("hides AI users everywhere and lists a person's room messages and chats", async () => {
+    const owner = await session(await makeAdmin("botq", "owner"));
+    const botId = `${BOT_UUID_PREFIX}${"0".repeat(11)}1`;
+    await db.insert(users).values([
+      { id: botId, email: `${TAG}-bot@example.com`, passwordHash: "x", username: `${TAG}_bot`, gender: "female", dateOfBirth: new Date("1998-01-01") },
+      { email: `${TAG}-real@example.com`, passwordHash: "x", username: `${TAG}_real`, gender: "male", dateOfBirth: new Date("1998-01-01") },
+    ]).onConflictDoNothing();
+    const [real] = await db.select({ id: users.id }).from(users).where(eq(users.username, `${TAG}_real`));
+    const list = (await get(owner.cookie, `/admin/users?q=${TAG}&limit=50`)).json().users as { username: string }[];
+    expect(list.some((u) => u.username === `${TAG}_real`)).toBe(true);
+    expect(list.some((u) => u.username === `${TAG}_bot`)).toBe(false);
+    expect((await get(owner.cookie, `/admin/users/${botId}`)).statusCode).toBe(404);
+    expect((await get(owner.cookie, `/admin/users/${botId}/activity?kind=rooms`)).statusCode).toBe(404);
+
+    await db.insert(roomMessages).values({ roomId: "global", seq: 900_000_001, clientMsgId: `${TAG}-m1`, userId: real!.id, alias: "Quiet Otter 47", text: "hello room" }).onConflictDoNothing();
+    const rooms = (await get(owner.cookie, `/admin/users/${real!.id}/activity?kind=rooms`)).json();
+    expect(rooms.messages[0]).toMatchObject({ text: "hello room", place: "global", roomName: "Global chat" });
+    const chats = (await get(owner.cookie, `/admin/users/${real!.id}/activity?kind=chats`)).json();
+    expect(chats.chats).toEqual([]);
+    await db.delete(roomMessages).where(eq(roomMessages.clientMsgId, `${TAG}-m1`));
+    await db.delete(users).where(eq(users.id, botId));
+  });
   it("works the escalation queue: ban cuts the user off, dismiss clears evidence, all audited", async () => {
     const owner = await session(await makeAdmin("esc", "owner"));
     const reporter = await makeUser(srv.app, TAG, "rep");

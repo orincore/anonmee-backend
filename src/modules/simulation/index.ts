@@ -7,3 +7,5 @@ export * from "./group.simulator";
 export * from "./match.simulator";
 export * from "./bots.gate";
 export * from "./usage.meter";
+export * from "./real-users";
+export * from "./bots.switch";

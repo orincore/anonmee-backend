@@ -1,8 +1,10 @@
 import { EventEmitter } from "node:events";
 import { env } from "../../config/env";
 import type { AppServer } from "../../realtime/context";
+import type { RedisClient } from "../../lib/redis";
 import type { PresenceService } from "../presence/presence.service";
 import { botsMayRun } from "./bots.rules";
+import { botSwitch } from "./bots.switch";
 import { botUsage } from "./usage.meter";
 
 const CACHE_MS = 3000;
@@ -24,7 +26,7 @@ export class BotGate extends EventEmitter {
   /** AI messages written into each room since someone last looked at it. */
   private backlog = new Map<string, number>();
 
-  constructor(private io: AppServer, private presence: PresenceService) {
+  constructor(private io: AppServer, private presence: PresenceService, private redis: RedisClient) {
     super();
   }
 
@@ -37,7 +39,7 @@ export class BotGate extends EventEmitter {
 
   /** Master switch: enabled, budget left, and at least one real person online. */
   public async open(): Promise<boolean> {
-    if (!env.BOTS_ENABLED || !botUsage.budgetLeft()) return false;
+    if (!(await botSwitch(this.redis).isOn()) || !botUsage.budgetLeft()) return false;
     return botsMayRun({ enabled: true, budgetLeft: true, humansOnline: await this.humansOnline(), maxHumans: env.BOTS_MAX_HUMANS_ONLINE });
   }
 

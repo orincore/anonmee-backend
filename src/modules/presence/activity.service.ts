@@ -3,6 +3,7 @@ import type { Db } from "../../db/client";
 import type { RedisClient } from "../../lib/redis";
 import type { PresenceService } from "./presence.service";
 import { ageFromDob } from "../../contracts";
+import { realUser } from "../simulation/real-users";
 
 export interface ActivityService {
   recordScreenTime(userId: string, seconds: number): Promise<void>;
@@ -137,6 +138,7 @@ export function activityService(db: Db, redis: RedisClient, presence: PresenceSe
             coalesce(avg(screen_time_seconds) filter (where screen_time_seconds > 0), 0)::int as avg_sec,
             count(*)::int as total_users
           FROM users
+          WHERE ${realUser(sql`id`)}
         `),
         db.execute<{ today_sec: number; today_users: number; today_messages: number }>(sql`
           SELECT
@@ -144,18 +146,18 @@ export function activityService(db: Db, redis: RedisClient, presence: PresenceSe
             count(distinct user_id)::int as today_users,
             coalesce(sum(messages_sent), 0)::int as today_messages
           FROM user_activity_daily
-          WHERE day = CURRENT_DATE
+          WHERE day = CURRENT_DATE AND ${realUser(sql`user_id`)}
         `),
         db.execute<{ period_users: number; period_messages: number }>(sql`
           SELECT
             count(distinct user_id)::int as period_users,
             coalesce(sum(messages_sent), 0)::int as period_messages
           FROM user_activity_daily
-          WHERE day >= CURRENT_DATE - (${daysInterval - 1} * interval '1 day')
+          WHERE day >= CURRENT_DATE - (${daysInterval - 1} * interval '1 day') AND ${realUser(sql`user_id`)}
         `),
       ]);
 
-      const onlineCount = await presence.count();
+      const onlineCount = await presence.realCount(); // staff see people only, not the simulated crowd
       const summaryRow = summaryRes[0] || { total_sec: 0, avg_sec: 0, total_users: 0 };
       const todayRow = todayRes[0] || { today_sec: 0, today_users: 0, today_messages: 0 };
       const periodRow = periodRes[0] || { period_users: 0, period_messages: 0 };
@@ -189,7 +191,7 @@ export function activityService(db: Db, redis: RedisClient, presence: PresenceSe
             count(distinct user_id) as active_users,
             sum(messages_sent) as messages
           FROM user_activity_daily
-          WHERE day >= CURRENT_DATE - (${daysInterval - 1} * interval '1 day')
+          WHERE day >= CURRENT_DATE - (${daysInterval - 1} * interval '1 day') AND ${realUser(sql`user_id`)}
           GROUP BY day
         ) uad ON uad.day = d.day::date
         ORDER BY d.day ASC;
@@ -204,7 +206,7 @@ export function activityService(db: Db, redis: RedisClient, presence: PresenceSe
         LEFT JOIN (
           SELECT extract(hour from created_at)::int as hour, count(*)::int as count
           FROM room_messages
-          WHERE created_at >= now() - interval '14 days'
+          WHERE created_at >= now() - interval '14 days' AND ${realUser(sql`user_id`)}
           GROUP BY 1
         ) cnt ON cnt.hour = h.hour
         ORDER BY h.hour ASC;
@@ -229,7 +231,7 @@ export function activityService(db: Db, redis: RedisClient, presence: PresenceSe
         db.execute<{ count: number }>(sql`
           SELECT count(*)::int as count
           FROM users u
-          WHERE ${searchTerm ? sql`(u.username ILIKE ${searchTerm} OR u.email ILIKE ${searchTerm})` : sql`TRUE`}
+          WHERE ${realUser(sql`u.id`)} AND ${searchTerm ? sql`(u.username ILIKE ${searchTerm} OR u.email ILIKE ${searchTerm})` : sql`TRUE`}
         `),
         db.execute<{
           id: string;
@@ -257,7 +259,7 @@ export function activityService(db: Db, redis: RedisClient, presence: PresenceSe
           FROM users u
           LEFT JOIN user_activity_daily today_stat
             ON today_stat.user_id = u.id AND today_stat.day = CURRENT_DATE
-          WHERE ${searchTerm ? sql`(u.username ILIKE ${searchTerm} OR u.email ILIKE ${searchTerm})` : sql`TRUE`}
+          WHERE ${realUser(sql`u.id`)} AND ${searchTerm ? sql`(u.username ILIKE ${searchTerm} OR u.email ILIKE ${searchTerm})` : sql`TRUE`}
           ORDER BY u.screen_time_seconds DESC, u.created_at DESC
           LIMIT ${safeLimit} OFFSET ${offset}
         `),

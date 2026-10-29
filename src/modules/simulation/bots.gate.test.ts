@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BACKLOG_CAP, BotGate } from "./bots.gate";
+import { botSwitch } from "./bots.switch";
+
+/** Just enough Redis for the on/off switch. Shared, because the switch is one per process. */
+const store = new Map<string, string>();
+const fakeRedis = {
+  get: async (k: string) => store.get(k) ?? null,
+  set: async (k: string, v: string) => void store.set(k, v),
+} as never;
 
 /** A tiny stand-in for the socket server: which people are in which socket room. */
 function fakeIo(rooms: Record<string, number>) {
@@ -18,11 +26,23 @@ describe("BotGate: only spend where it matters", () => {
     vi.useFakeTimers();
     humans = 1;
     rooms = { "r:global": 1 }; // one person connected, not looking at the global chat
-    gate = new BotGate(fakeIo(rooms) as never, { realCount: async () => humans } as never);
+    gate = new BotGate(fakeIo(rooms) as never, { realCount: async () => humans } as never, fakeRedis);
   });
-  afterEach(() => vi.useRealTimers());
+  afterEach(() => {
+    store.clear();
+    vi.useRealTimers();
+  });
 
   const later = () => vi.advanceTimersByTimeAsync(4000); // past the gate's short cache
+
+  it("the owner's switch stops all chatter at once, and turning it back on wakes it", async () => {
+    expect(await gate.hasAudience("r:global")).toBe(true);
+    await botSwitch(fakeRedis).set(false);
+    expect(await gate.open()).toBe(false);
+    expect(await gate.hasAudience("r:global")).toBe(false);
+    await botSwitch(fakeRedis).set(true);
+    expect(await gate.open()).toBe(true);
+  });
 
   it("writes a small backlog for someone busy elsewhere, then stops", async () => {
     for (let i = 0; i < BACKLOG_CAP; i++) {

@@ -69,7 +69,7 @@ export function createRealtime(httpServer: HttpServer, db: Db, redis: RedisClien
 
   // AI companions only run while a real person is connected, and their spend is metered against a daily budget.
   botUsage.attach(redis);
-  const botGate = new BotGate(io, presence);
+  const botGate = new BotGate(io, presence, redis);
   const globalSim = new GlobalChatSimulator(io, redis, rooms, botGate, typing);
   const groupSim = new GroupSimulator(db, redis, rooms, io, botGate);
   const matchSim = new MatchSimulator(db, redis, chats, io, onMatchedCb);

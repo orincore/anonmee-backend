@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { and, asc, desc, eq, gt, gte, ilike, isNull, like, lt, notLike, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, ilike, inArray, isNull, like, lt, notLike, or, sql } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { env } from "../../config/env";
@@ -16,6 +16,8 @@ import type { ActivityService } from "../presence/activity.service";
 import type { PresenceService } from "../presence/presence.service";
 import { AI_FLAG_PREFIX, SEVERE_PREFIX } from "../simulation/chat.hostility";
 import { SYSTEM_BOT_USER_ID } from "../simulation/persona.service";
+import { botSwitch } from "../simulation/bots.switch";
+import { botUser, realUser } from "../simulation/real-users";
 import { botUsage } from "../simulation/usage.meter";
 import { ADMIN_TTL_S, AdminAuthError, adminAuth, requireRole, type AdminSession } from "./admin.auth";
 
@@ -86,28 +88,28 @@ export function adminRoutes(deps: {
       const prev = since(days * 2);
       const n = (q: Promise<{ n: number }[]>) => q.then((r) => r[0]?.n ?? 0);
       const [totalUsers, newNow, newPrev, banned, matchRows, groupsMade, messages, openReports, daily, totalShares] = await Promise.all([
-        n(db.select({ n: sql<number>`count(*)::int` }).from(users)),
-        n(db.select({ n: sql<number>`count(*)::int` }).from(users).where(gte(users.createdAt, from))),
-        n(db.select({ n: sql<number>`count(*)::int` }).from(users).where(and(gte(users.createdAt, prev), lt(users.createdAt, from)))),
-        n(db.select({ n: sql<number>`count(*)::int` }).from(users).where(sql`${users.bannedAt} is not null`)),
+        n(db.select({ n: sql<number>`count(*)::int` }).from(users).where(realUser(users.id))),
+        n(db.select({ n: sql<number>`count(*)::int` }).from(users).where(and(realUser(users.id), gte(users.createdAt, from)))),
+        n(db.select({ n: sql<number>`count(*)::int` }).from(users).where(and(realUser(users.id), gte(users.createdAt, prev), lt(users.createdAt, from)))),
+        n(db.select({ n: sql<number>`count(*)::int` }).from(users).where(and(realUser(users.id), sql`${users.bannedAt} is not null`))),
         db.select({
           total: sql<number>`count(*)::int`,
           avgWait: sql<number>`coalesce(avg(${matches.waitMs}), 0)::int`,
           lasted: sql<number>`count(*) filter (where ${matches.endedAt} is not null and ${matches.endedAt} - ${matches.createdAt} > interval '60 seconds')::int`,
           ended: sql<number>`count(*) filter (where ${matches.endedAt} is not null)::int`,
-        }).from(matches).where(gte(matches.createdAt, from)),
+        }).from(matches).where(and(gte(matches.createdAt, from), realUser(matches.userAId), realUser(matches.userBId))),
         n(db.select({ n: sql<number>`count(*)::int` }).from(groups).where(gte(groups.createdAt, from))),
-        n(db.select({ n: sql<number>`count(*)::int` }).from(roomMessages).where(gte(roomMessages.createdAt, from))),
-        n(db.select({ n: sql<number>`count(*)::int` }).from(reports).where(eq(reports.status, "open"))),
+        n(db.select({ n: sql<number>`count(*)::int` }).from(roomMessages).where(and(gte(roomMessages.createdAt, from), realUser(roomMessages.userId)))),
+        n(db.select({ n: sql<number>`count(*)::int` }).from(reports).where(and(eq(reports.status, "open"), realUser(reports.reportedId)))),
         db.execute(sql`select to_char(d, 'YYYY-MM-DD') as day,
-            (select count(*)::int from users where created_at >= d and created_at < d + interval '1 day') as users,
-            (select count(*)::int from matches where created_at >= d and created_at < d + interval '1 day') as matches
+            (select count(*)::int from users u where u.created_at >= d and u.created_at < d + interval '1 day' and ${realUser(sql`u.id`)}) as users,
+            (select count(*)::int from matches m where m.created_at >= d and m.created_at < d + interval '1 day' and ${realUser(sql`m.user_a_id`)} and ${realUser(sql`m.user_b_id`)}) as matches
           from generate_series(date_trunc('day', ${from.toISOString()}::timestamp), date_trunc('day', now()), interval '1 day') d order by d`),
         redis.get("analytics:shares:total").then((v) => Number(v || 0)).catch(() => 0),
       ]);
       const m = matchRows[0]!;
       const out = {
-        days, totalUsers, newUsers: newNow, newUsersPrevious: newPrev, bannedUsers: banned, onlineNow: await deps.presence.count(),
+        days, totalUsers, newUsers: newNow, newUsersPrevious: newPrev, bannedUsers: banned, onlineNow: await deps.presence.realCount(), // the public counter adds a simulated crowd; staff see people only
         matches: m.total, averageWaitMs: m.avgWait, matchSuccessRate: m.ended ? Math.round((m.lasted / m.ended) * 100) : null,
         groupsCreated: groupsMade, messagesSent: messages, openReports, daily, viralShares: totalShares,
       };
@@ -128,6 +130,7 @@ export function adminRoutes(deps: {
       const severe = like(reports.reason, `${SEVERE_PREFIX}%`);
       const where = and(
         eq(reports.status, q.status),
+        realUser(reports.reportedId), // reports against AI users go to bot review, not this queue
         q.severity === "severe" ? severe : q.severity === "normal" ? notLike(reports.reason, `${SEVERE_PREFIX}%`) : undefined,
         c ? or(gt(reports.createdAt, c.at), and(eq(reports.createdAt, c.at), gt(reports.id, c.id))) : undefined,
       );
@@ -181,6 +184,7 @@ export function adminRoutes(deps: {
       const c = dec(q.cursor);
       const term = q.q ? `${q.q.replace(/[%_\\]/g, "\\$&")}%` : undefined; // prefix search can use the unique indexes
       const where = and(
+        realUser(users.id),
         term ? or(ilike(users.email, term), ilike(users.username, term)) : undefined,
         q.status === "banned" ? sql`${users.bannedAt} is not null` : q.status === "active" ? isNull(users.bannedAt) : undefined,
         q.channel ? eq(users.acquisitionChannel, q.channel) : undefined,
@@ -202,7 +206,7 @@ export function adminRoutes(deps: {
       if (!s) return;
       const p = z.object({ id: z.string().uuid() }).safeParse(req.params);
       if (!p.success) return reply.code(404).send({ error: "not_found", message: "No such user." });
-      const [u] = await db.select().from(users).where(eq(users.id, p.data.id)).limit(1);
+      const [u] = await db.select().from(users).where(and(eq(users.id, p.data.id), realUser(users.id))).limit(1);
       if (!u) return reply.code(404).send({ error: "not_found", message: "No such user." });
       await audit(s, "user.view", u.id); // every look at an account is on record
       const one = async (q: Promise<{ n: number }[]>) => (await q)[0]?.n ?? 0;
@@ -233,6 +237,70 @@ export function adminRoutes(deps: {
             todayMessagesSent: todayActivity?.messagesSent ?? 0,
           },
         },
+      };
+    });
+
+    /**
+     * Where one person has been talking, for report review. Group and global messages are kept for the rolling retention window,
+     * so they are listed in full. 1:1 chats are ephemeral: we list each chat (when, how it ended, whether the partner was an AI user)
+     * and attach the saved report evidence, never the live text.
+     */
+    app.get("/admin/users/:id/activity", async (req, reply) => {
+      const s = await requireRole(auth, req, reply, [...STAFF]);
+      if (!s) return;
+      const p = z.object({ id: z.string().uuid() }).safeParse(req.params);
+      const q = pageQ.extend({ kind: z.enum(["rooms", "chats"]) }).safeParse(req.query);
+      if (!p.success || !q.success) return reply.code(400).send({ error: "invalid", message: "Bad request." });
+      const [u] = await db.select({ id: users.id }).from(users).where(and(eq(users.id, p.data.id), realUser(users.id))).limit(1);
+      if (!u) return reply.code(404).send({ error: "not_found", message: "No such user." });
+      const { kind, limit } = q.data;
+      const c = dec(q.data.cursor);
+      if (!c) await audit(s, `user.activity.${kind}`, u.id); // the first page is the look; later pages are the same look
+
+      if (kind === "rooms") {
+        const rows = await db.select({
+          id: roomMessages.id, roomId: roomMessages.roomId, alias: roomMessages.alias, text: roomMessages.text, createdAt: roomMessages.createdAt,
+        }).from(roomMessages)
+          .where(and(eq(roomMessages.userId, u.id), c ? or(lt(roomMessages.createdAt, c.at), and(eq(roomMessages.createdAt, c.at), lt(roomMessages.id, c.id))) : undefined))
+          .orderBy(desc(roomMessages.createdAt), desc(roomMessages.id)).limit(limit + 1);
+        const page = rows.slice(0, limit);
+        const groupIds = [...new Set(page.map((r) => r.roomId).filter((id) => id !== "global" && z.string().uuid().safeParse(id).success))];
+        const titles = groupIds.length
+          ? new Map((await db.select({ id: groups.id, title: groups.title }).from(groups).where(inArray(groups.id, groupIds))).map((g) => [g.id, g.title]))
+          : new Map<string, string>();
+        return {
+          messages: page.map((r) => ({
+            id: r.id, text: r.text, alias: r.alias, at: r.createdAt.getTime(),
+            roomId: r.roomId, place: r.roomId === "global" ? "global" : "group",
+            roomName: r.roomId === "global" ? "Global chat" : (titles.get(r.roomId) ?? "Deleted group"),
+          })),
+          nextCursor: rows.length > limit ? enc(page[page.length - 1]!.createdAt, page[page.length - 1]!.id) : null,
+        };
+      }
+
+      const mine = or(eq(matches.userAId, u.id), eq(matches.userBId, u.id));
+      const rows = await db.select({
+        id: matches.id, intent: matches.intent, createdAt: matches.createdAt, endedAt: matches.endedAt, endedReason: matches.endedReason,
+        partnerGender: users.gender, partnerDob: users.dateOfBirth, partnerIsAi: botUser(users.id),
+      }).from(matches)
+        .innerJoin(users, eq(users.id, sql`case when ${matches.userAId} = ${u.id} then ${matches.userBId} else ${matches.userAId} end`))
+        .where(and(mine, c ? or(lt(matches.createdAt, c.at), and(eq(matches.createdAt, c.at), lt(matches.id, c.id))) : undefined))
+        .orderBy(desc(matches.createdAt), desc(matches.id)).limit(limit + 1);
+      const page = rows.slice(0, limit);
+      const ids = page.map((r) => r.id);
+      const evidence = ids.length
+        ? await db.select({ roomId: reports.roomId, evidence: reports.evidence, reason: reports.reason }).from(reports)
+            .where(and(eq(reports.reportedId, u.id), inArray(reports.roomId, ids)))
+        : [];
+      const byChat = new Map<string, { reason: string; evidence: string | null }[]>();
+      for (const e of evidence) byChat.set(e.roomId!, [...(byChat.get(e.roomId!) ?? []), { reason: e.reason, evidence: e.evidence }]);
+      return {
+        chats: page.map((r) => ({
+          id: r.id, intent: r.intent, startedAt: r.createdAt.getTime(), endedAt: r.endedAt?.getTime() ?? null, endedReason: r.endedReason,
+          partner: { gender: r.partnerGender, age: ageFromDob(r.partnerDob), ai: r.partnerIsAi },
+          reports: byChat.get(r.id) ?? [],
+        })),
+        nextCursor: rows.length > limit ? enc(page[page.length - 1]!.createdAt, page[page.length - 1]!.id) : null,
       };
     });
 
@@ -270,7 +338,25 @@ export function adminRoutes(deps: {
       const s = await requireRole(auth, req, reply, [...ALL]);
       if (!s) return;
       const { days } = z.object({ days: z.coerce.number().int().min(1).max(31).default(7) }).parse(req.query);
-      return { enabled: env.BOTS_ENABLED, ...(await botUsage.report(days)) };
+      return { enabled: await botSwitch(redis).isOn(), ...(await botUsage.report(days)) };
+    });
+
+    /** The master switch for every AI user. Owner only; every flip is audited. The environment's BOTS_ENABLED=false overrides it. */
+    app.get("/admin/bots/switch", async (req, reply) => {
+      const s = await requireRole(auth, req, reply, [...ALL]);
+      if (!s) return;
+      return { on: await botSwitch(redis).isOn(), lockedByEnv: !env.BOTS_ENABLED };
+    });
+
+    app.post("/admin/bots/switch", async (req, reply) => {
+      const s = await requireRole(auth, req, reply, [...OWNER]);
+      if (!s) return;
+      const b = z.object({ on: z.boolean() }).safeParse(req.body);
+      if (!b.success) return reply.code(400).send({ error: "invalid", message: "Bad request." });
+      if (!env.BOTS_ENABLED) return reply.code(409).send({ error: "locked", message: "AI users are turned off in the server settings." });
+      await botSwitch(redis).set(b.data.on);
+      await audit(s, b.data.on ? "bots.on" : "bots.off");
+      return { on: b.data.on, lockedByEnv: false };
     });
 
     // ---------- Traffic analytics ----------
@@ -286,7 +372,7 @@ export function adminRoutes(deps: {
         db.select({ channel: visits.channel, visits: sql<number>`count(*)::int`, visitors: sql<number>`count(distinct ${visits.visitorId})::int` })
           .from(visits).where(gte(visits.createdAt, from)).groupBy(visits.channel),
         db.select({ channel: users.acquisitionChannel, signups: sql<number>`count(*)::int` })
-          .from(users).where(and(gte(users.createdAt, from), sql`${users.acquisitionChannel} is not null`)).groupBy(users.acquisitionChannel),
+          .from(users).where(and(realUser(users.id), gte(users.createdAt, from), sql`${users.acquisitionChannel} is not null`)).groupBy(users.acquisitionChannel),
         db.select({ channel: visits.channel, source: visits.source, visits: sql<number>`count(*)::int`, signups: sql<number>`count(${visits.signedUpUserId})::int` })
           .from(visits).where(gte(visits.createdAt, from)).groupBy(visits.channel, visits.source).orderBy(desc(sql`count(*)`)).limit(20),
         db.select({ campaign: visits.campaign, source: visits.source, medium: visits.medium, visits: sql<number>`count(*)::int`, visitors: sql<number>`count(distinct ${visits.visitorId})::int`, signups: sql<number>`count(${visits.signedUpUserId})::int` })

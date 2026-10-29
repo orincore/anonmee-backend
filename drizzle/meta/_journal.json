@@ -85,6 +85,13 @@
       "when": 1793210262578,
       "tag": "0011_mature_prodigy",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1793292915263,
+      "tag": "0012_outstanding_shotgun",
+      "breakpoints": true
     }
   ]
 }

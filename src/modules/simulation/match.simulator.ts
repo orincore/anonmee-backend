@@ -9,6 +9,7 @@ import type { AppServer } from "../../realtime/context";
 import { moderationRepo } from "../moderation/moderation.repo";
 import { aiFlagReason, isSevere, type HostileReason } from "./chat.hostility";
 import { createDynamicPersona, ensureSystemBotUser, getPersonaById, isBotUserId, pickBotGender, SYSTEM_BOT_USER_ID } from "./persona.service";
+import { botSwitch } from "./bots.switch";
 import { noDashes } from "./chat.texting";
 import { AiChatGuard } from "./ai.chat.guard";
 import { ReplyPacer } from "./ai.reply.pacer";
@@ -98,6 +99,9 @@ export class MatchSimulator {
   }
 
   private async pairWithAiIfWaiting(userId: string) {
+    // Owner switched the AI off: the person keeps waiting for a real match.
+    if (!(await botSwitch(this.redis).isOn())) return;
+
     // Check if still in Redis queue
     const score = await this.redis.zscore(QUEUE, userId);
     if (score === null) return; // User already matched or left
