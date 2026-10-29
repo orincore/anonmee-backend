@@ -24,7 +24,10 @@ const kChat = (id: string) => `chat:${id}`;
 const kUser = (uid: string) => `chat:user:${uid}`;
 const kLog = (id: string) => `chat:${id}:log`;
 
-export function chatStore(redis: RedisClient) {
+/** Called for every message after it is appended. Used to keep a review copy of chats with an AI user (see chat.review.ts). */
+export type ChatMessageHook = (chat: Chat, from: ChatSide, msg: ChatMessage) => void;
+
+export function chatStore(redis: RedisClient, onMessage?: ChatMessageHook) {
   async function get(id: string): Promise<Chat | null> {
     const h = await redis.hgetall(kChat(id));
     if (!h.a || !h.b) return null;
@@ -79,6 +82,7 @@ export function chatStore(redis: RedisClient) {
         gender: from.gender, age: from.age, text, at: Date.now(), ...(replyTo ? { replyTo } : {}),
       };
       await redis.multi().rpush(kLog(c.id), JSON.stringify(msg)).ltrim(kLog(c.id), -LOG_MAX, -1).exec();
+      onMessage?.(c, from, msg);
       return msg;
     },
 

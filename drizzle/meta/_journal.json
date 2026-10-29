@@ -92,6 +92,13 @@
       "when": 1793292915263,
       "tag": "0012_outstanding_shotgun",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1793293651480,
+      "tag": "0013_abandoned_tyrannus",
+      "breakpoints": true
     }
   ]
 }

@@ -6,7 +6,7 @@ import { env } from "../../config/env";
 import { ageFromDob } from "../../contracts";
 import type { Db } from "../../db/client";
 import {
-  adminAudit, blocks, campaigns, groups, matches, preferences, refreshTokens, reports, roomMessages, userActivityDaily, users, visits,
+  adminAudit, blocks, campaigns, chatReviewMessages, groups, matches, preferences, refreshTokens, reports, roomMessages, userActivityDaily, users, visits,
 } from "../../db/schema";
 import type { RedisClient } from "../../lib/redis";
 import { loginThrottle } from "../../lib/throttle";
@@ -243,7 +243,7 @@ export function adminRoutes(deps: {
     /**
      * Where one person has been talking, for report review. Group and global messages are kept for the rolling retention window,
      * so they are listed in full. 1:1 chats are ephemeral: we list each chat (when, how it ended, whether the partner was an AI user)
-     * and attach the saved report evidence, never the live text.
+     * and attach the saved report evidence. Every chat carries its transcript, kept 90 days.
      */
     app.get("/admin/users/:id/activity", async (req, reply) => {
       const s = await requireRole(auth, req, reply, [...STAFF]);
@@ -292,6 +292,12 @@ export function adminRoutes(deps: {
         ? await db.select({ roomId: reports.roomId, evidence: reports.evidence, reason: reports.reason }).from(reports)
             .where(and(eq(reports.reportedId, u.id), inArray(reports.roomId, ids)))
         : [];
+      const lines = ids.length
+        ? await db.select({ chatId: chatReviewMessages.chatId, seq: chatReviewMessages.seq, userId: chatReviewMessages.userId, alias: chatReviewMessages.alias, text: chatReviewMessages.text, at: chatReviewMessages.createdAt })
+            .from(chatReviewMessages).where(inArray(chatReviewMessages.chatId, ids)).orderBy(asc(chatReviewMessages.chatId), asc(chatReviewMessages.seq))
+        : [];
+      const transcript = new Map<string, { alias: string; mine: boolean; text: string; at: number }[]>();
+      for (const l of lines) transcript.set(l.chatId, [...(transcript.get(l.chatId) ?? []), { alias: l.alias, mine: l.userId === u.id, text: l.text, at: l.at.getTime() }]);
       const byChat = new Map<string, { reason: string; evidence: string | null }[]>();
       for (const e of evidence) byChat.set(e.roomId!, [...(byChat.get(e.roomId!) ?? []), { reason: e.reason, evidence: e.evidence }]);
       return {
@@ -299,6 +305,7 @@ export function adminRoutes(deps: {
           id: r.id, intent: r.intent, startedAt: r.createdAt.getTime(), endedAt: r.endedAt?.getTime() ?? null, endedReason: r.endedReason,
           partner: { gender: r.partnerGender, age: ageFromDob(r.partnerDob), ai: r.partnerIsAi },
           reports: byChat.get(r.id) ?? [],
+          transcript: transcript.get(r.id) ?? [],
         })),
         nextCursor: rows.length > limit ? enc(page[page.length - 1]!.createdAt, page[page.length - 1]!.id) : null,
       };

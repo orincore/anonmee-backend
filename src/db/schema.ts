@@ -131,6 +131,25 @@ export const roomMessages = pgTable(
   ],
 );
 
+/**
+ * Record of every 1:1 chat, for safety review, legal requests and improving the AI. Staff only; other users never see it.
+ * Purged after CHAT_REVIEW_DAYS, and gone with the account (cascade through matches).
+ */
+export const chatReviewMessages = pgTable(
+  "chat_review_messages",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    chatId: uuid("chat_id").notNull().references(() => matches.id, { onDelete: "cascade" }),
+    seq: integer("seq").notNull(),
+    /** Author: the real person or the AI user. */
+    userId: uuid("user_id").notNull(),
+    alias: varchar("alias", { length: 40 }).notNull(),
+    text: varchar("text", { length: 2000 }).notNull(),
+    createdAt: timestamp("created_at", { precision: 3 }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("chat_review_chat_seq_uq").on(t.chatId, t.seq), index("chat_review_created_idx").on(t.createdAt)],
+);
+
 export const blocks = pgTable(
   "blocks",
   {

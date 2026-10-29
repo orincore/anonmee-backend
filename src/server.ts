@@ -3,6 +3,7 @@ import { buildApp } from "./app";
 import type { RedisClient } from "./lib/redis";
 import { EV } from "./contracts";
 import type { GroupView } from "./modules/groups/groups.routes";
+import { chatReview } from "./modules/chat/chat.review";
 import { chatStore } from "./modules/chat/chat.store";
 import { peerResolver } from "./modules/moderation/moderation.peers";
 import { reactionsService } from "./modules/chat/reactions.service";
@@ -19,7 +20,7 @@ export async function buildServer(db: Db, redis: RedisClient) {
   let groupLeft: (groupId: string, userId: string) => void = () => {};
   let moderated: (roomId: string, target: string, kind: "block" | "report", banned: boolean) => void = () => {};
   let banned: (userId: string) => void = () => {};
-  const chats = chatStore(redis);
+  const chats = chatStore(redis, chatReview(db).hook);
   const presence = presenceService(redis);
   const pulse = pulseService(redis);
   const activity = activityService(db, redis, presence);

@@ -30,6 +30,8 @@ const schema = z
   TOGETHER_API_KEY: z.string().default(""),
   TOGETHER_MODEL: z.string().default("deepseek-ai/DeepSeek-V4.1-Flash-1017"),
   /** Kill switch for every AI companion. */
+  /** Keeps a staff-only record of every 1:1 chat for CHAT_REVIEW_DAYS. Off until Privacy, FAQ and llms.txt describe it. */
+  CHAT_REVIEW_ENABLED: z.enum(["true", "false"]).default("false").transform((v) => v === "true"),
   BOTS_ENABLED: z.enum(["true", "false"]).default("true").transform((v) => v === "true"),
   /** Hard stop for AI spend per UTC day, in tokens (input + output). 2M is roughly one US dollar. */
   BOTS_DAILY_TOKEN_BUDGET: z.coerce.number().int().min(0).default(2_000_000),
